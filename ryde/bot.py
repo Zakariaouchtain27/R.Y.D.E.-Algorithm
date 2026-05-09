@@ -112,9 +112,16 @@ class RYDEBot:
 
         decision = self.engine.evaluate(booking, snapshot, historical_max_drop)
 
-        # After the hold window, any score above WAIT threshold means strike
-        if decision.action in (RYDEAction.STRIKE, RYDEAction.PHANTOM_HOLD):
+        # FIX (Bug 2 — “Premature Execution” flaw):
+        # Previously, PHANTOM_HOLD also triggered _execute_rebooking, turning
+        # a 24-hour hold into an accidental 1-hour hold on the next poll cycle.
+        # Now only a STRIKE escalates to rebooking; PHANTOM_HOLD lets the clock
+        # keep ticking; anything else (WAIT/IGNORE) releases the hold because
+        # the price moved unfavorably and the window is no longer worth locking.
+        if decision.action == RYDEAction.STRIKE:
             self._execute_rebooking(booking, snapshot, adapter)
+        elif decision.action == RYDEAction.PHANTOM_HOLD:
+            log.info("%s: Market stable. Continuing phantom hold.", booking.booking_id)
         else:
             self.holds.release(booking.booking_id)
             log.info("%s: Hold released — price moved unfavorably.", booking.booking_id)
