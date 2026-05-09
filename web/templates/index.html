@@ -1,0 +1,123 @@
+{% extends "base.html" %}
+
+{% block content %}
+
+<!-- Hero -->
+<section class="max-w-5xl mx-auto px-6 py-24 text-center">
+    <div class="inline-flex items-center gap-2 bg-blue-50 text-blue-700 text-sm font-medium px-4 py-1.5 rounded-full mb-8">
+        <span class="w-2 h-2 bg-blue-500 rounded-full animate-pulse"></span>
+        Monitoring flights in real time
+    </div>
+    <h1 class="text-5xl font-extrabold tracking-tight text-gray-900 mb-6 leading-tight">
+        Your flight just got cheaper.<br>
+        <span class="text-blue-600">We already rebooked it.</span>
+    </h1>
+    <p class="text-xl text-gray-500 max-w-2xl mx-auto mb-10">
+        RYDE watches your booking 24/7 and automatically rebooks at a lower price the moment one appears.
+        You only pay <strong class="text-gray-700">20% of what we save you.</strong>
+        Nothing if prices don't drop.
+    </p>
+    <a href="/register" class="inline-block bg-blue-600 text-white font-semibold text-lg px-8 py-4 rounded-xl hover:bg-blue-700 transition-colors shadow-lg shadow-blue-100">
+        Protect my booking &rarr;
+    </a>
+    <p class="text-sm text-gray-400 mt-4">No subscription &nbsp;&middot;&nbsp; No upfront cost &nbsp;&middot;&nbsp; Cancel anytime</p>
+</section>
+
+<!-- How it works -->
+<section class="bg-gray-50 py-20">
+    <div class="max-w-5xl mx-auto px-6">
+        <h2 class="text-3xl font-bold text-center mb-16">How it works</h2>
+        <div class="grid grid-cols-1 md:grid-cols-4 gap-10 text-center">
+            <div>
+                <div class="text-4xl mb-4">✈️</div>
+                <h3 class="font-semibold text-lg mb-2">1. Register</h3>
+                <p class="text-gray-500 text-sm">Enter your flight details and the price you paid. Takes 2 minutes.</p>
+            </div>
+            <div>
+                <div class="text-4xl mb-4">👁️</div>
+                <h3 class="font-semibold text-lg mb-2">2. We watch</h3>
+                <p class="text-gray-500 text-sm">Our algorithm checks prices every hour across all available fares.</p>
+            </div>
+            <div>
+                <div class="text-4xl mb-4">⚡</div>
+                <h3 class="font-semibold text-lg mb-2">3. Auto-rebook</h3>
+                <p class="text-gray-500 text-sm">Price drops? We cancel and rebook at the lower fare instantly.</p>
+            </div>
+            <div>
+                <div class="text-4xl mb-4">💰</div>
+                <h3 class="font-semibold text-lg mb-2">4. You save</h3>
+                <p class="text-gray-500 text-sm">We charge 20% of your savings. Zero cost if prices never drop.</p>
+            </div>
+        </div>
+    </div>
+</section>
+
+<!-- Example -->
+<section class="max-w-5xl mx-auto px-6 py-20">
+    <h2 class="text-3xl font-bold text-center mb-12">A real example</h2>
+    <div class="bg-white border border-gray-200 rounded-2xl p-8 max-w-md mx-auto shadow-sm">
+        <div class="flex justify-between items-center mb-6">
+            <div>
+                <p class="text-xs text-gray-400 mb-1">Original booking</p>
+                <p class="text-3xl font-bold">$850</p>
+                <p class="text-sm text-gray-500">JFK &rarr; CDG &nbsp;&middot;&nbsp; Jun 15</p>
+            </div>
+            <div class="text-2xl text-gray-300">&rarr;</div>
+            <div class="text-right">
+                <p class="text-xs text-gray-400 mb-1">RYDE rebooked at</p>
+                <p class="text-3xl font-bold text-green-600">$530</p>
+                <p class="text-sm text-gray-500">Same flight, same cabin</p>
+            </div>
+        </div>
+        <div class="border-t border-gray-100 pt-5 space-y-2 text-sm">
+            <div class="flex justify-between">
+                <span class="text-gray-500">You saved</span>
+                <span class="font-semibold text-green-600">$320.00</span>
+            </div>
+            <div class="flex justify-between">
+                <span class="text-gray-500">RYDE fee (20%)</span>
+                <span class="font-semibold">$64.00</span>
+            </div>
+            <div class="flex justify-between font-bold border-t border-gray-100 pt-2 mt-1">
+                <span>Your net gain</span>
+                <span class="text-green-600">$256.00</span>
+            </div>
+        </div>
+    </div>
+</section>
+
+<!-- FAQ -->
+<section class="bg-gray-50 py-20">
+    <div class="max-w-3xl mx-auto px-6">
+        <h2 class="text-3xl font-bold text-center mb-12">Questions</h2>
+        <div class="space-y-4">
+            <div class="bg-white rounded-xl p-6 border border-gray-100">
+                <h3 class="font-semibold mb-1">What if prices never drop?</h3>
+                <p class="text-gray-500 text-sm">You pay absolutely nothing. We only earn when we actually save you money.</p>
+            </div>
+            <div class="bg-white rounded-xl p-6 border border-gray-100">
+                <h3 class="font-semibold mb-1">Will I get the same seat?</h3>
+                <p class="text-gray-500 text-sm">We rebook the same cabin class on the same route. The specific seat may change. You can set "same seat preferred" when registering.</p>
+            </div>
+            <div class="bg-white rounded-xl p-6 border border-gray-100">
+                <h3 class="font-semibold mb-1">How do you access my booking?</h3>
+                <p class="text-gray-500 text-sm">We integrate with airlines via Duffel's NDC API. Your booking reference lets us cancel and rebook on your behalf.</p>
+            </div>
+            <div class="bg-white rounded-xl p-6 border border-gray-100">
+                <h3 class="font-semibold mb-1">Is my payment safe?</h3>
+                <p class="text-gray-500 text-sm">Yes. Payments are processed by Stripe. We never store your card details &mdash; only a secure token used to charge the success fee.</p>
+            </div>
+        </div>
+    </div>
+</section>
+
+<!-- Bottom CTA -->
+<section class="max-w-5xl mx-auto px-6 py-24 text-center">
+    <h2 class="text-3xl font-bold mb-4">Ready to stop overpaying?</h2>
+    <p class="text-gray-500 mb-8">Add your booking in 2 minutes. We handle everything else.</p>
+    <a href="/register" class="inline-block bg-blue-600 text-white font-semibold text-lg px-8 py-4 rounded-xl hover:bg-blue-700 transition-colors">
+        Get started &rarr;
+    </a>
+</section>
+
+{% endblock %}

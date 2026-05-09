@@ -1,0 +1,105 @@
+{% extends "base.html" %}
+{% block title %}Register your booking &mdash; RYDE{% endblock %}
+
+{% block content %}
+<div class="max-w-2xl mx-auto px-6 py-16">
+
+    <div class="mb-10">
+        <p class="text-sm text-blue-600 font-medium mb-2">Step 1 of 2</p>
+        <h1 class="text-3xl font-bold mb-2">Register your booking</h1>
+        <p class="text-gray-500">We'll start monitoring immediately and rebook automatically when prices drop.</p>
+    </div>
+
+    <form method="POST" action="/register" class="space-y-6">
+
+        <!-- Personal info -->
+        <div class="bg-gray-50 rounded-2xl p-6 space-y-4">
+            <h2 class="font-semibold text-gray-700 text-sm uppercase tracking-wide">Your details</h2>
+            <div class="grid grid-cols-2 gap-4">
+                <div>
+                    <label class="block text-sm text-gray-600 mb-1">Full name</label>
+                    <input name="name" type="text" required placeholder="John Doe"
+                           class="w-full border border-gray-200 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white">
+                </div>
+                <div>
+                    <label class="block text-sm text-gray-600 mb-1">Email</label>
+                    <input name="email" type="email" required placeholder="you@email.com"
+                           class="w-full border border-gray-200 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white">
+                </div>
+            </div>
+        </div>
+
+        <!-- Flight details -->
+        <div class="bg-gray-50 rounded-2xl p-6 space-y-4">
+            <h2 class="font-semibold text-gray-700 text-sm uppercase tracking-wide">Flight details</h2>
+            <div class="grid grid-cols-3 gap-4">
+                <div>
+                    <label class="block text-sm text-gray-600 mb-1">From (IATA)</label>
+                    <input name="origin" type="text" required placeholder="JFK" maxlength="3"
+                           class="w-full border border-gray-200 rounded-xl px-4 py-2.5 text-sm uppercase focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white">
+                </div>
+                <div>
+                    <label class="block text-sm text-gray-600 mb-1">To (IATA)</label>
+                    <input name="destination" type="text" required placeholder="CDG" maxlength="3"
+                           class="w-full border border-gray-200 rounded-xl px-4 py-2.5 text-sm uppercase focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white">
+                </div>
+                <div>
+                    <label class="block text-sm text-gray-600 mb-1">Departure date</label>
+                    <input name="departure_date" type="date" required
+                           class="w-full border border-gray-200 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white">
+                </div>
+            </div>
+            <div class="grid grid-cols-2 gap-4">
+                <div>
+                    <label class="block text-sm text-gray-600 mb-1">Price you paid (USD)</label>
+                    <div class="relative">
+                        <span class="absolute left-3 top-2.5 text-gray-400 text-sm">$</span>
+                        <input name="original_price" type="number" required min="1" step="0.01" placeholder="850.00"
+                               class="w-full border border-gray-200 rounded-xl pl-7 pr-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white">
+                    </div>
+                </div>
+                <div>
+                    <label class="block text-sm text-gray-600 mb-1">Cancellation fee (USD)</label>
+                    <div class="relative">
+                        <span class="absolute left-3 top-2.5 text-gray-400 text-sm">$</span>
+                        <input name="cancellation_fee" type="number" required min="0" step="0.01" placeholder="50.00"
+                               class="w-full border border-gray-200 rounded-xl pl-7 pr-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white">
+                    </div>
+                </div>
+            </div>
+            <div>
+                <label class="block text-sm text-gray-600 mb-1">Booking reference (Duffel order ID)</label>
+                <input name="booking_ref" type="text" required placeholder="ord_..."
+                       class="w-full border border-gray-200 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white">
+            </div>
+        </div>
+
+        <!-- Seat preference -->
+        <div class="bg-gray-50 rounded-2xl p-6 space-y-3">
+            <h2 class="font-semibold text-gray-700 text-sm uppercase tracking-wide">Seat preference</h2>
+            <label class="flex items-start gap-3 cursor-pointer">
+                <input type="radio" name="seat_preference" value="cheapest" checked class="mt-0.5">
+                <div>
+                    <p class="font-medium text-sm">Cheapest option</p>
+                    <p class="text-xs text-gray-400">Rebook the lowest available fare. Specific seat may change.</p>
+                </div>
+            </label>
+            <label class="flex items-start gap-3 cursor-pointer">
+                <input type="radio" name="seat_preference" value="same_seat" class="mt-0.5">
+                <div>
+                    <p class="font-medium text-sm">Same seat preferred</p>
+                    <p class="text-xs text-gray-400">Only rebook if the same seat number is still available at the lower price.</p>
+                </div>
+            </label>
+        </div>
+
+        <button type="submit"
+                class="w-full bg-blue-600 text-white font-semibold py-3.5 rounded-xl hover:bg-blue-700 transition-colors text-base">
+            Continue to payment setup &rarr;
+        </button>
+        <p class="text-center text-xs text-gray-400">
+            Your card will not be charged now. We only charge 20% of what we save you.
+        </p>
+    </form>
+</div>
+{% endblock %}
