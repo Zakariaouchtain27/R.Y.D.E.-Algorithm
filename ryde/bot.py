@@ -3,10 +3,11 @@ from datetime import datetime
 from typing import Dict, Optional
 
 from .adapters.base import BaseAdapter
-from .engine import RegretMinimizationEngine
 from .models import Booking, PriceSnapshot, RYDEAction, RebookingResult
 from .notifier import Notifier
 from .phantom_hold import PhantomHoldManager
+from .prism import PRISMEngine
+from .prism.price_history import PriceHistory, make_route_key
 from .store import BookingStore
 
 log = logging.getLogger(__name__)
@@ -14,8 +15,7 @@ log = logging.getLogger(__name__)
 
 class RYDEBot:
     """
-    Orchestrator that wires together the engine, adapters, hold manager,
-    store, and notifier into a single callable loop.
+    Orchestrator: PRISM engine + adapters + hold manager + store + notifier.
 
     Usage:
         bot = RYDEBot(adapters={"duffel": DuffelAdapter(key)})
@@ -27,17 +27,13 @@ class RYDEBot:
         self,
         adapters: Dict[str, BaseAdapter],
         db_path: str = "ryde.db",
-        strike_threshold: float = 72.0,
-        phantom_hold_threshold: float = 48.0,
     ):
         self.adapters = adapters
-        self.engine = RegretMinimizationEngine(
-            strike_threshold=strike_threshold,
-            phantom_hold_threshold=phantom_hold_threshold,
-        )
+        self.engine = PRISMEngine(db_path=db_path)
         self.holds = PhantomHoldManager()
         self.notifier = Notifier()
         self.store = BookingStore(db_path)
+        self._history = PriceHistory(db_path)
 
     # ------------------------------------------------------------------
     # Public API
@@ -48,7 +44,7 @@ class RYDEBot:
         self.store.upsert(booking)
         log.info("Registered %s for monitoring.", booking.booking_id)
 
-    def process(self, booking: Booking, historical_max_drop: Optional[float] = None):
+    def process(self, booking: Booking, n_competitors_dropped: int = 0):
         """
         Single evaluation cycle for one booking.
         Called by PriceMonitor on every poll tick.
@@ -57,16 +53,17 @@ class RYDEBot:
         if adapter is None:
             return
 
-        # If there is an active phantom hold, check whether to escalate or release
         if self.holds.is_active(booking.booking_id):
-            self._handle_hold_cycle(booking, adapter, historical_max_drop)
+            self._handle_hold_cycle(booking, adapter, n_competitors_dropped)
             return
 
         snapshot = self._fetch_price(booking, adapter)
         if snapshot is None:
             return
 
-        decision = self.engine.evaluate(booking, snapshot, historical_max_drop)
+        decision = self.engine.evaluate(
+            booking, snapshot, n_competitors_dropped=n_competitors_dropped
+        )
         log.info(
             "%s → %s (score=%.1f, savings=$%.2f)",
             booking.booking_id, decision.action,
@@ -76,7 +73,6 @@ class RYDEBot:
 
         if decision.action == RYDEAction.STRIKE:
             self._execute_rebooking(booking, snapshot, adapter)
-
         elif decision.action == RYDEAction.PHANTOM_HOLD:
             hold_ref = None
             try:
@@ -89,7 +85,7 @@ class RYDEBot:
                 snapshot.current_price,
                 hold_ref,
             )
-            log.info("%s: Phantom hold created (API ref: %s).", booking.booking_id, hold_ref)
+            log.info("%s: Phantom hold created (ref: %s).", booking.booking_id, hold_ref)
 
     # ------------------------------------------------------------------
     # Internal
@@ -99,22 +95,25 @@ class RYDEBot:
         self,
         booking: Booking,
         adapter: BaseAdapter,
-        historical_max_drop: Optional[float],
+        n_competitors_dropped: int,
     ):
         hold = self.holds.get(booking.booking_id)
         if hold is None:
-            return  # Hold expired; next poll will re-evaluate fresh
+            return  # Hold expired; next poll re-evaluates fresh
 
         log.info("%s: On phantom hold until %s.", booking.booking_id, hold.expires_at)
         snapshot = self._fetch_price(booking, adapter)
         if snapshot is None:
             return
 
-        decision = self.engine.evaluate(booking, snapshot, historical_max_drop)
+        decision = self.engine.evaluate(
+            booking, snapshot, n_competitors_dropped=n_competitors_dropped
+        )
 
-        # After the hold window, any score above WAIT threshold means strike
-        if decision.action in (RYDEAction.STRIKE, RYDEAction.PHANTOM_HOLD):
+        if decision.action == RYDEAction.STRIKE:
             self._execute_rebooking(booking, snapshot, adapter)
+        elif decision.action == RYDEAction.PHANTOM_HOLD:
+            log.info("%s: Market stable. Continuing phantom hold.", booking.booking_id)
         else:
             self.holds.release(booking.booking_id)
             log.info("%s: Hold released — price moved unfavorably.", booking.booking_id)
@@ -144,7 +143,20 @@ class RYDEBot:
                 booking.original_price - snapshot.current_price - booking.cancellation_fee, 2
             )
 
-            # Update stored booking to reflect the new price and reference
+            route_key = make_route_key(
+                booking.origin,
+                booking.destination,
+                booking.departure_date.strftime("%Y-%m-%d"),
+            )
+            self._history.record_outcome(
+                booking_id=booking.booking_id,
+                route_key=route_key,
+                original_price=booking.original_price,
+                rebooked_price=snapshot.current_price,
+                savings=result.savings_realized,
+                success=True,
+            )
+
             booking.adapter_booking_ref = new_ref
             booking.original_price = snapshot.current_price
             self.store.upsert(booking)
