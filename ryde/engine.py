@@ -74,10 +74,18 @@ class RegretMinimizationEngine:
         # Net advantage of acting now vs waiting
         strike_value = net_savings - expected_future_gain
 
-        # Normalize against the best plausible outcome
-        ceiling = max(historical_max_drop or 0, net_savings, 1.0)
-        normalized = max(0.0, min(strike_value / ceiling, 1.0))
+        # FIX (Bug 1 — “End of Time” trap):
+        # When departure is imminent (prob_drop < 5%), there is no time left to
+        # wait for a better deal. Normalizing against historical_max_drop here
+        # would produce an artificially low score and result in a WAIT decision
+        # even though positive savings are available right now. Force ceiling to
+        # net_savings so the ratio is 1.0 and the score reflects pure urgency.
+        if prob_drop < 0.05 and net_savings > 0:
+            ceiling = net_savings
+        else:
+            ceiling = max(historical_max_drop or 0, net_savings, 1.0)
 
+        normalized = max(0.0, min(strike_value / ceiling, 1.0))
         urgency = self._seat_urgency(snapshot.seats_remaining)
         strike_score = normalized * urgency * 100
 

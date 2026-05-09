@@ -76,15 +76,23 @@ class DuffelAdapter(BaseAdapter):
             return None
 
     def cancel_booking(self, booking: Booking) -> bool:
+        # FIX (Bug 3 — API Phantom Route):
+        # The Duffel API does not expose a single-step cancel endpoint.
+        # It requires a strict 2-step flow: first request a cancellation quote
+        # (which may include a refund amount), then explicitly confirm it.
+        # The old single POST to /orders/{id}/actions/cancel returns 404 every time.
         try:
-            r = requests.post(
-                f"{self.BASE}/orders/{booking.adapter_booking_ref}/actions/cancel",
-                headers=self._headers,
-                timeout=30,
+            # Step 1: Request a cancellation (get the quote/id)
+            quote = self._post(
+                "/order_cancellations",
+                {"data": {"order_id": booking.adapter_booking_ref}},
             )
-            r.raise_for_status()
+            cancellation_id = quote["data"]["id"]
+
+            # Step 2: Confirm the cancellation
+            self._post(f"/order_cancellations/{cancellation_id}/actions/confirm", {})
             return True
-        except requests.HTTPError as exc:
+        except Exception as exc:
             log.error("Cancel failed [%s]: %s", booking.booking_id, exc)
             return False
 
