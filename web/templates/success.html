@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block title %}You're all set &mdash; RYDE{% endblock %}
+
+{% block content %}
+<div class="max-w-lg mx-auto px-6 py-24 text-center">
+
+    <div class="w-20 h-20 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-8">
+        <svg class="w-10 h-10 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7"/>
+        </svg>
+    </div>
+
+    <h1 class="text-3xl font-bold mb-3">You're all set!</h1>
+    <p class="text-gray-500 mb-2">
+        We're now watching your
+        <strong>{{ client.booking_data.origin }} &rarr; {{ client.booking_data.destination }}</strong> flight.
+    </p>
+    <p class="text-gray-500 mb-10">We'll rebook automatically if prices drop and notify you by email.</p>
+
+    <div class="bg-gray-50 rounded-2xl p-6 text-left space-y-3 mb-10 text-sm text-gray-600">
+        <h2 class="font-semibold text-gray-800 mb-2">What happens next</h2>
+        <div class="flex gap-3"><span>⏱️</span><span>Prices are checked every hour.</span></div>
+        <div class="flex gap-3"><span>⚡</span><span>Price drops? We cancel and rebook the lower fare instantly.</span></div>
+        <div class="flex gap-3"><span>📧</span><span>We'll email <strong>{{ client.email }}</strong> when a rebook happens.</span></div>
+        <div class="flex gap-3"><span>💳</span><span>We charge 20% of savings only after a successful rebook.</span></div>
+    </div>
+
+    <a href="/dashboard/{{ client.client_id }}"
+       class="inline-block bg-blue-600 text-white font-semibold px-6 py-3 rounded-xl hover:bg-blue-700 transition-colors">
+        View my dashboard &rarr;
+    </a>
+    <p class="text-xs text-gray-400 mt-4">Bookmark your dashboard link to check back anytime.</p>
+</div>
+{% endblock %}

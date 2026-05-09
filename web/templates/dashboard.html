@@ -1,0 +1,83 @@
+{% extends "base.html" %}
+{% block title %}Dashboard &mdash; RYDE{% endblock %}
+
+{% block content %}
+<div class="max-w-3xl mx-auto px-6 py-16">
+
+    <!-- Header -->
+    <div class="flex justify-between items-start mb-10">
+        <div>
+            <h1 class="text-2xl font-bold">{{ client.name }}'s dashboard</h1>
+            <p class="text-gray-400 text-sm">{{ client.email }}</p>
+        </div>
+        <div class="text-right">
+            <p class="text-xs text-gray-400 mb-1">Total saved</p>
+            <p class="text-3xl font-bold text-green-600">${{ "%.2f"|format(client.total_savings) }}</p>
+        </div>
+    </div>
+
+    <!-- Booking card -->
+    <div class="bg-white border border-gray-200 rounded-2xl p-6 mb-8 shadow-sm">
+        <div class="flex justify-between items-center mb-5">
+            <h2 class="font-semibold">Monitored booking</h2>
+            {% if client.monitoring_active %}
+            <span class="bg-green-100 text-green-700 text-xs font-medium px-3 py-1 rounded-full">
+                &#9679; Monitoring
+            </span>
+            {% else %}
+            <span class="bg-gray-100 text-gray-500 text-xs font-medium px-3 py-1 rounded-full">
+                Inactive
+            </span>
+            {% endif %}
+        </div>
+        <div class="grid grid-cols-3 gap-6 text-sm">
+            <div>
+                <p class="text-gray-400 mb-1">Route</p>
+                <p class="font-bold text-xl">{{ client.booking_data.origin }} &rarr; {{ client.booking_data.destination }}</p>
+            </div>
+            <div>
+                <p class="text-gray-400 mb-1">Departure</p>
+                <p class="font-medium">{{ client.booking_data.departure_date }}</p>
+            </div>
+            <div>
+                <p class="text-gray-400 mb-1">Original price</p>
+                <p class="font-medium">${{ client.booking_data.original_price }}</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- Activity log -->
+    <h2 class="font-semibold mb-4">Activity</h2>
+
+    {% if events %}
+    <div class="space-y-3">
+        {% for event in events %}
+        <div class="bg-gray-50 rounded-xl p-4 text-sm flex justify-between items-start">
+            <div>
+                {% if event.event == 'ryde.rebooking' %}
+                    {% if event.data.success %}
+                    <span class="font-semibold text-green-700">✓ Rebooked</span>
+                    <span class="text-gray-500 ml-2">Saved ${{ event.data.savings_realized }}</span>
+                    {% else %}
+                    <span class="font-semibold text-red-600">✗ Rebook failed</span>
+                    <span class="text-gray-400 text-xs ml-2">{{ event.data.error }}</span>
+                    {% endif %}
+                {% elif event.event == 'ryde.decision' %}
+                    <span class="font-medium text-gray-700">{{ event.data.action }}</span>
+                    <span class="text-gray-400 ml-2">score {{ event.data.confidence_score }} &nbsp;&middot;&nbsp; savings ${{ event.data.net_savings }}</span>
+                {% endif %}
+            </div>
+            <span class="text-xs text-gray-400 whitespace-nowrap ml-4">{{ event.created_at }}</span>
+        </div>
+        {% endfor %}
+    </div>
+    {% else %}
+    <div class="bg-gray-50 rounded-2xl p-12 text-center text-gray-400">
+        <p class="text-3xl mb-3">👁️</p>
+        <p class="font-medium text-gray-500">No activity yet.</p>
+        <p class="text-sm mt-1">We're watching your flight. Prices are checked every hour.</p>
+    </div>
+    {% endif %}
+
+</div>
+{% endblock %}
