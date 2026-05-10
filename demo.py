@@ -205,6 +205,7 @@ def demo_full_engine():
     print(f"\n  {'Scenario':<36} {'Savings':>8} {'Action':<16} {'Score':>7}")
     print(f"  {'-'*71}")
 
+    engine = None
     for sc in SCENARIOS:
         db = tempfile.mktemp(suffix=".db")
         try:
@@ -228,8 +229,20 @@ def demo_full_engine():
             net_str = f"${d.net_savings:.0f}"
             print(f"  {sc['name']:<36} {net_str:>8} {d.action:<16} {d.confidence_score:>6.1f}%")
         finally:
+            # Explicitly close the SQLite connection before deletion.
+            # On Windows the OS holds a file lock until the connection is closed,
+            # so os.unlink() would raise PermissionError without this.
+            try:
+                if engine is not None:
+                    engine.history._conn.close()
+            except Exception:
+                pass
             if os.path.exists(db):
-                os.unlink(db)
+                try:
+                    os.unlink(db)
+                except OSError:
+                    pass
+            engine = None
 
     print(f"\n  Every decision is backed by 5,000 Monte Carlo simulations.")
     print(f"  PRISM never guesses — it computes.")
