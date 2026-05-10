@@ -117,7 +117,7 @@ async def ws_ticker(ws: WebSocket):
 
 @app.get("/terminal", response_class=HTMLResponse)
 async def terminal(request: Request):
-    return templates.TemplateResponse("terminal.html", {"request": request})
+    return templates.TemplateResponse(request, "terminal.html")
 
 
 # ---------------------------------------------------------------------------
@@ -126,12 +126,12 @@ async def terminal(request: Request):
 
 @app.get("/", response_class=HTMLResponse)
 async def landing(request: Request):
-    return templates.TemplateResponse("index.html", {"request": request})
+    return templates.TemplateResponse(request, "index.html")
 
 
 @app.get("/register", response_class=HTMLResponse)
 async def register_form(request: Request):
-    return templates.TemplateResponse("register.html", {"request": request})
+    return templates.TemplateResponse(request, "register.html")
 
 
 @app.post("/register")
@@ -174,8 +174,7 @@ async def setup_payment_page(request: Request, client_id: str):
         raise HTTPException(status_code=404)
 
     setup_intent = _get_stripe().create_setup_intent(client["stripe_customer_id"])
-    return templates.TemplateResponse("payment.html", {
-        "request": request,
+    return templates.TemplateResponse(request, "payment.html", {
         "client_id": client_id,
         "client_secret": setup_intent.client_secret,
         "publishable_key": os.getenv("STRIPE_PUBLISHABLE_KEY", ""),
@@ -229,8 +228,7 @@ async def success_page(request: Request, client_id: str):
     client = _clients.get_client(client_id)
     if not client:
         raise HTTPException(status_code=404)
-    return templates.TemplateResponse("success.html", {
-        "request": request,
+    return templates.TemplateResponse(request, "success.html", {
         "client": client,
     })
 
@@ -241,8 +239,7 @@ async def dashboard(request: Request, client_id: str):
     if not client:
         raise HTTPException(status_code=404)
     events = _clients.get_events(client_id)
-    return templates.TemplateResponse("dashboard.html", {
-        "request": request,
+    return templates.TemplateResponse(request, "dashboard.html", {
         "client": client,
         "events": events,
     })
