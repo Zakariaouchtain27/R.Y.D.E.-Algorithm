@@ -2,8 +2,9 @@ import logging
 from datetime import datetime
 from typing import Dict, Optional
 
+from . import events
 from .adapters.base import BaseAdapter
-from .models import Booking, PriceSnapshot, RYDEAction, RebookingResult
+from .models import Booking, PriceSnapshot, RYDEAction, RYDEDecision, RebookingResult
 from .notifier import Notifier
 from .phantom_hold import PhantomHoldManager
 from .prism import PRISMEngine
@@ -34,6 +35,7 @@ class RYDEBot:
         self.notifier = Notifier()
         self.store = BookingStore(db_path)
         self._history = PriceHistory(db_path)
+        self._last_prices: Dict[str, float] = {}
 
     # ------------------------------------------------------------------
     # Public API
@@ -69,6 +71,7 @@ class RYDEBot:
             booking.booking_id, decision.action,
             decision.confidence_score, decision.net_savings,
         )
+        self._emit_price_event(booking, snapshot, decision)
         self.notifier.decision(booking, decision)
 
         if decision.action == RYDEAction.STRIKE:
@@ -91,6 +94,32 @@ class RYDEBot:
     # Internal
     # ------------------------------------------------------------------
 
+    def _emit_price_event(
+        self,
+        booking: Booking,
+        snapshot: PriceSnapshot,
+        decision: RYDEDecision,
+    ) -> None:
+        """Publish a ticker event whenever the observed price moves."""
+        old_price = self._last_prices.get(booking.booking_id)
+        new_price = float(snapshot.current_price)
+
+        if old_price is not None and abs(old_price - new_price) < 1e-6:
+            return
+
+        events.publish({
+            "booking_id": booking.booking_id,
+            "route": f"{booking.origin}-{booking.destination}",
+            "old_price": round(old_price, 2) if old_price is not None else None,
+            "new_price": round(new_price, 2),
+            "action": decision.action.value,
+            "score": round(decision.confidence_score, 1),
+            "savings": round(decision.net_savings, 2),
+            "seats_remaining": snapshot.seats_remaining,
+            "timestamp": datetime.utcnow().isoformat() + "Z",
+        })
+        self._last_prices[booking.booking_id] = new_price
+
     def _handle_hold_cycle(
         self,
         booking: Booking,
@@ -109,6 +138,7 @@ class RYDEBot:
         decision = self.engine.evaluate(
             booking, snapshot, n_competitors_dropped=n_competitors_dropped
         )
+        self._emit_price_event(booking, snapshot, decision)
 
         # Only STRIKE escalates to rebooking; PHANTOM_HOLD keeps the clock
         # ticking; WAIT/IGNORE releases the hold (price moved unfavorably).

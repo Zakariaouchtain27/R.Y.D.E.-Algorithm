@@ -1,12 +1,14 @@
+import asyncio
 import os
 import uuid
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Set
 
-from fastapi import FastAPI, Form, HTTPException, Request
+from fastapi import FastAPI, Form, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
+from ryde import events as ryde_events
 from ryde.models import Booking, Passenger
 from ryde.store import BookingStore
 from .api_v1 import router as api_v1_router
@@ -34,6 +36,88 @@ def _get_stripe() -> StripeClient:
             raise HTTPException(status_code=500, detail="STRIPE_SECRET_KEY not configured.")
         _stripe = StripeClient(key)
     return _stripe
+
+
+# ---------------------------------------------------------------------------
+# Live ticker: WebSocket fan-out
+# ---------------------------------------------------------------------------
+
+class ConnectionManager:
+    def __init__(self) -> None:
+        self._clients: Set[WebSocket] = set()
+        self._lock = asyncio.Lock()
+
+    async def connect(self, ws: WebSocket) -> None:
+        await ws.accept()
+        async with self._lock:
+            self._clients.add(ws)
+
+    async def disconnect(self, ws: WebSocket) -> None:
+        async with self._lock:
+            self._clients.discard(ws)
+
+    async def broadcast(self, payload: dict) -> None:
+        async with self._lock:
+            targets = list(self._clients)
+        dead = []
+        for ws in targets:
+            try:
+                await ws.send_json(payload)
+            except Exception:
+                dead.append(ws)
+        if dead:
+            async with self._lock:
+                for ws in dead:
+                    self._clients.discard(ws)
+
+
+_manager = ConnectionManager()
+_loop: Optional[asyncio.AbstractEventLoop] = None
+
+
+def _on_ryde_event(event: dict) -> None:
+    """
+    Bridges the bot thread → FastAPI event loop.
+    Called by ryde.events.publish() (sync, possibly in a worker thread).
+    """
+    if _loop is None or _loop.is_closed():
+        return
+    asyncio.run_coroutine_threadsafe(_manager.broadcast(event), _loop)
+
+
+@app.on_event("startup")
+async def _wire_event_bus() -> None:
+    global _loop
+    _loop = asyncio.get_running_loop()
+    ryde_events.subscribe(_on_ryde_event)
+
+
+@app.on_event("shutdown")
+async def _unwire_event_bus() -> None:
+    ryde_events.unsubscribe(_on_ryde_event)
+
+
+@app.websocket("/ws/ticker")
+async def ws_ticker(ws: WebSocket):
+    await _manager.connect(ws)
+    try:
+        # Greet the client so the UI can flip its status indicator.
+        await ws.send_json({
+            "type": "hello",
+            "timestamp": datetime.utcnow().isoformat() + "Z",
+        })
+        while True:
+            # Drain any client → server messages so the connection stays open.
+            await ws.receive_text()
+    except WebSocketDisconnect:
+        await _manager.disconnect(ws)
+    except Exception:
+        await _manager.disconnect(ws)
+
+
+@app.get("/terminal", response_class=HTMLResponse)
+async def terminal(request: Request):
+    return templates.TemplateResponse("terminal.html", {"request": request})
 
 
 # ---------------------------------------------------------------------------
