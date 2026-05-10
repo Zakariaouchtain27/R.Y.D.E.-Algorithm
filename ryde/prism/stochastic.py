@@ -17,7 +17,8 @@ class OrnsteinUhlenbeck:
     """Fit once, simulate many times."""
 
     _KAPPA_MIN, _KAPPA_MAX = 1e-4, 2.0
-    _SIGMA_MIN, _SIGMA_MAX = 1.0, 200.0   # USD / day
+    _SIGMA_MIN, _SIGMA_MAX = 1.0, 200.0      # USD / day
+    _VOL_MIN,   _VOL_MAX   = 0.3, 3.0        # volatility_multiplier bounds
 
     def __init__(self):
         self.kappa: float = 0.05   # slow reversion default
@@ -32,7 +33,7 @@ class OrnsteinUhlenbeck:
             return self
 
         prices = np.array(price_series, dtype=float)
-        P = prices[:-1]
+        P  = prices[:-1]
         dP = np.diff(prices)
 
         X = np.column_stack([np.ones_like(P), P])
@@ -49,21 +50,42 @@ class OrnsteinUhlenbeck:
     @staticmethod
     def u_curve_mean(reference_price: float, days_to_dep: float) -> float:
         """
-        Airline U-curve long-run mean θ(t):
-          >90d   → +5%  (early booking premium)
-          ~42d   → −15% (advance purchase sweet spot)
-          <7d    → +20% (last-minute spike)
+        Airline pricing U-curve θ(t) — fully continuous, zero discontinuities.
+
+        Key values (multiples of reference_price):
+          d = 0    → ×1.20  last-minute spike peak
+          d = 7    → smooth junction (∼×1.02), both branches agree exactly
+          d = 42   → ×0.87  advance-purchase sweet spot (−13%)
+          d = 90   → ×1.045 far-out premium (≈5%)
+          d → ∞    → ×1.05  long-run premium floor
+
+        Implementation
+        --------------
+        For d ≥ 7:
+            factor = BASE - DIP_DEPTH * exp(-0.5 * ((d - 42) / 18)^2)
+        For d < 7:
+            linear from SPIKE_PEAK at d=0 down to the main-curve value at d=7,
+            so the two pieces meet without a jump.
         """
         d = max(days_to_dep, 0.0)
-        if d <= 7:
-            factor = 1.20 - (d / 7) * 0.10
-        elif d <= 90:
-            center, width = 42.0, 18.0
-            dip = -0.15 * math.exp(-0.5 * ((d - center) / width) ** 2)
-            blend = 1.0 - (d - 7) / (90 - 7)
-            factor = 1.0 + dip * blend + 0.02 * (1 - blend)
+
+        SWEET_SPOT = 42.0
+        WIDTH      = 18.0
+        DIP_DEPTH  = 0.18
+        BASE       = 1.05   # far-out premium level
+        SPIKE_PEAK = 1.20   # last-minute peak
+
+        gaussian = math.exp(-0.5 * ((d - SWEET_SPOT) / WIDTH) ** 2)
+
+        if d >= 7:
+            factor = BASE - DIP_DEPTH * gaussian
         else:
-            factor = 1.05
+            # Compute the main-curve value at d=7 so both branches meet exactly
+            g7       = math.exp(-0.5 * ((7.0 - SWEET_SPOT) / WIDTH) ** 2)
+            d7_value = BASE - DIP_DEPTH * g7
+            # Linear ramp: SPIKE_PEAK at d=0, d7_value at d=7
+            factor = SPIKE_PEAK - (d / 7.0) * (SPIKE_PEAK - d7_value)
+
         return max(reference_price * factor, 1.0)
 
     def simulate_paths(
@@ -78,24 +100,29 @@ class OrnsteinUhlenbeck:
         """
         Euler-Maruyama discretization.
         Returns ndarray (n_paths, days+1), prices floored at $1.
+
+        volatility_multiplier is clamped to [0.3, 3.0] before use —
+        passing extreme values (e.g. 10) would produce nonsensical paths.
         """
         if rng is None:
             rng = np.random.default_rng()
 
-        sigma_eff = self.sigma * volatility_multiplier
+        vol_mult  = float(np.clip(volatility_multiplier, self._VOL_MIN, self._VOL_MAX))
+        sigma_eff = self.sigma * vol_mult
+
         paths = np.empty((n_paths, days + 1), dtype=float)
         paths[:, 0] = current_price
 
+        # Pre-compute θ(t): days remaining decreases as we step forward
         theta = np.array(
             [self.u_curve_mean(reference_price, days - t) for t in range(days + 1)],
             dtype=float,
         )
         noise = rng.standard_normal((n_paths, days))
 
-        sqrt_dt = math.sqrt(1.0)  # dt = 1 day
         for t in range(days):
-            drift = self.kappa * (theta[t] - paths[:, t])
-            diffusion = sigma_eff * sqrt_dt * noise[:, t]
+            drift     = self.kappa * (theta[t] - paths[:, t])  # dt = 1 day
+            diffusion = sigma_eff * noise[:, t]                 # sqrt(dt) = 1
             paths[:, t + 1] = np.maximum(paths[:, t] + drift + diffusion, 1.0)
 
         return paths

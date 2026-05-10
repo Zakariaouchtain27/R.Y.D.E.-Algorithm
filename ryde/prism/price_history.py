@@ -1,6 +1,9 @@
+import logging
 import sqlite3
 import threading
 from typing import List, Optional
+
+log = logging.getLogger(__name__)
 
 
 def make_route_key(origin: str, destination: str, departure_date: str) -> str:
@@ -15,7 +18,7 @@ class PriceHistory:
     """
 
     def __init__(self, db_path: str = "ryde.db"):
-        self._db = db_path
+        self._db   = db_path
         self._lock = threading.Lock()
         self._init_db()
 
@@ -59,9 +62,19 @@ class PriceHistory:
         seats_remaining: Optional[int] = None,
         days_to_dep: Optional[int] = None,
     ):
+        """
+        Persist one price observation.
+        Prices ≤ 0 are silently dropped — one bad API response should not
+        corrupt the OU fit for the entire route.
+        """
+        if price <= 0:
+            log.warning("Skipping invalid price %.2f for route %s", price, route_key)
+            return
+
         with self._lock, self._conn() as conn:
             conn.execute(
-                """INSERT INTO price_snapshots (route_key, price, seats_remaining, days_to_dep)
+                """INSERT INTO price_snapshots
+                       (route_key, price, seats_remaining, days_to_dep)
                    VALUES (?, ?, ?, ?)""",
                 (route_key, price, seats_remaining, days_to_dep),
             )
@@ -79,9 +92,11 @@ class PriceHistory:
         with self._lock, self._conn() as conn:
             conn.execute(
                 """INSERT INTO rebooking_outcomes
-                       (booking_id, route_key, original_price, rebooked_price, savings, success)
+                       (booking_id, route_key, original_price,
+                        rebooked_price, savings, success)
                    VALUES (?, ?, ?, ?, ?, ?)""",
-                (booking_id, route_key, original_price, rebooked_price, savings, int(success)),
+                (booking_id, route_key, original_price,
+                 rebooked_price, savings, int(success)),
             )
             conn.commit()
 
@@ -96,16 +111,24 @@ class PriceHistory:
             ).fetchall()
         return [r[0] for r in rows]
 
-    def get_reference_price(self, route_key: str) -> Optional[float]:
-        """Median recorded price — used as OU anchor."""
+    def get_reference_price(self, route_key: str, last_n: int = 30) -> Optional[float]:
+        """
+        Rolling median of the most recent N price snapshots.
+
+        Using all-time median would anchor the OU long-run mean to stale
+        prices on routes that have been trending down for months.
+        30 snapshots at hourly polling = last 30 hours of market data.
+        """
         with self._lock, self._conn() as conn:
             rows = conn.execute(
-                "SELECT price FROM price_snapshots WHERE route_key = ? ORDER BY price",
-                (route_key,),
+                """SELECT price FROM price_snapshots
+                   WHERE route_key = ?
+                   ORDER BY captured_at DESC LIMIT ?""",
+                (route_key, last_n),
             ).fetchall()
         if not rows:
             return None
-        prices = [r[0] for r in rows]
+        prices = sorted(r[0] for r in rows)
         return prices[len(prices) // 2]
 
     def get_booking_velocity(self, route_key: str, window_days: int = 7) -> Optional[float]:
@@ -119,13 +142,13 @@ class PriceHistory:
             ).fetchall()
         if len(rows) < 2:
             return None
-        first_seats = rows[-1][0]
-        last_seats = rows[0][0]
-        seats_sold = max(0, first_seats - last_seats)
+        first_seats = rows[-1][0]   # oldest in window
+        last_seats  = rows[0][0]    # most recent
+        seats_sold  = max(0, first_seats - last_seats)
         return seats_sold / max(window_days, 1)
 
     def get_historical_max_drop(self, route_key: str) -> Optional[float]:
-        """Largest single observed price drop for this route."""
+        """Largest consecutive price drop observed for this route."""
         with self._lock, self._conn() as conn:
             rows = conn.execute(
                 """SELECT price FROM price_snapshots
@@ -134,7 +157,7 @@ class PriceHistory:
             ).fetchall()
         if len(rows) < 2:
             return None
-        prices = [r[0] for r in rows]
+        prices   = [r[0] for r in rows]
         max_drop = max(
             (prices[i - 1] - prices[i] for i in range(1, len(prices))),
             default=0.0,
