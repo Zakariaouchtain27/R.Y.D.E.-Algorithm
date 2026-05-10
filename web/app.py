@@ -9,6 +9,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from ryde import events as ryde_events
+from ryde.live_market import get_market
 from ryde.models import Booking, Passenger
 from ryde.store import BookingStore
 from .api_v1 import router as api_v1_router
@@ -26,6 +27,7 @@ _stripe: Optional[StripeClient] = None
 
 _SUCCESS_FEE = float(os.getenv("SUCCESS_FEE_PERCENT", "20")) / 100
 _BASE_URL = os.getenv("BASE_URL", "http://localhost:8000")
+_MARKET_INTERVAL = float(os.getenv("MARKET_TICK_SECONDS", "3"))
 
 
 def _get_stripe() -> StripeClient:
@@ -73,12 +75,13 @@ class ConnectionManager:
 
 _manager = ConnectionManager()
 _loop: Optional[asyncio.AbstractEventLoop] = None
+_market_task: Optional[asyncio.Task] = None
 
 
 def _on_ryde_event(event: dict) -> None:
     """
-    Bridges the bot thread → FastAPI event loop.
-    Called by ryde.events.publish() (sync, possibly in a worker thread).
+    Bridges any thread → FastAPI event loop.
+    Called by ryde.events.publish() (sync, may be on a worker thread).
     """
     if _loop is None or _loop.is_closed():
         return
@@ -86,28 +89,34 @@ def _on_ryde_event(event: dict) -> None:
 
 
 @app.on_event("startup")
-async def _wire_event_bus() -> None:
-    global _loop
+async def _startup() -> None:
+    global _loop, _market_task
     _loop = asyncio.get_running_loop()
     ryde_events.subscribe(_on_ryde_event)
+    _market_task = asyncio.create_task(get_market().run(interval=_MARKET_INTERVAL))
 
 
 @app.on_event("shutdown")
-async def _unwire_event_bus() -> None:
+async def _shutdown() -> None:
     ryde_events.unsubscribe(_on_ryde_event)
+    get_market().stop()
+    if _market_task is not None:
+        _market_task.cancel()
 
 
 @app.websocket("/ws/ticker")
 async def ws_ticker(ws: WebSocket):
     await _manager.connect(ws)
     try:
-        # Greet the client so the UI can flip its status indicator.
         await ws.send_json({
             "type": "hello",
             "timestamp": datetime.utcnow().isoformat() + "Z",
         })
+        # Send current market state so newly opened pages populate instantly.
+        for snap in get_market().snapshot():
+            await ws.send_json(snap)
         while True:
-            # Drain any client → server messages so the connection stays open.
+            # Drain client → server messages so the connection stays open.
             await ws.receive_text()
     except WebSocketDisconnect:
         await _manager.disconnect(ws)
@@ -194,7 +203,6 @@ async def confirm_setup(
     _clients.save_payment_method(client_id, payment_method_id)
     _clients.activate_monitoring(client_id)
 
-    # Write booking into the bot's store — PriceMonitor picks it up automatically
     bd = client["booking_data"]
     name_parts = client["name"].split()
     booking = Booking(

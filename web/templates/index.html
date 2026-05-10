@@ -2,7 +2,163 @@
 
 {% block content %}
 
-<!-- Hero -->
+<!-- ============================================================ -->
+<!-- LIVE FLIGHT MARKETS                                          -->
+<!-- ============================================================ -->
+<section class="bg-slate-950 text-white border-b-4 border-blue-500">
+  <div class="max-w-7xl mx-auto px-6 py-8">
+    <div class="flex justify-between items-end mb-5">
+      <div>
+        <h2 class="text-2xl font-bold tracking-wider" style="font-family: 'SF Mono', Menlo, Consolas, monospace;">
+          <span class="text-amber-400">LIVE</span> FLIGHT MARKETS
+        </h2>
+        <p class="text-xs text-slate-400 mt-1">Real-time price walks across 10 popular routes · updated every <span id="mktInt">3s</span></p>
+      </div>
+      <div class="flex items-center gap-3 text-xs font-mono">
+        <span id="marketStatus" class="text-slate-400">CONNECTING…</span>
+        <span id="marketPulse" class="inline-block w-2.5 h-2.5 rounded-full bg-red-500" style="box-shadow: 0 0 8px currentColor"></span>
+      </div>
+    </div>
+
+    <div id="marketGrid" class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3">
+      <!-- Cards rendered by JS -->
+      <div class="text-slate-500 text-sm col-span-full text-center py-6 italic" id="marketEmpty">
+        Awaiting first tick…
+      </div>
+    </div>
+  </div>
+</section>
+
+<style>
+  .ticker-card {
+    background: #0f172a;
+    border: 1px solid #1e293b;
+    border-radius: 6px;
+    padding: 12px 14px;
+    transition: background-color 0.9s ease, border-color 0.9s ease;
+    font-family: 'SF Mono', Menlo, Consolas, monospace;
+  }
+  .ticker-card.flash-up   { background: rgba(16, 185, 129, 0.20); border-color: rgba(16, 185, 129, 0.6); }
+  .ticker-card.flash-down { background: rgba(239, 68, 68, 0.20);  border-color: rgba(239, 68, 68, 0.6); }
+  .ticker-route {
+    font-size: 11px; color: #94a3b8; letter-spacing: 1.5px; font-weight: 700;
+  }
+  .ticker-route .arrow { color: #f59e0b; margin: 0 4px; }
+  .ticker-price {
+    font-size: 22px; font-weight: 700; margin-top: 4px;
+    color: #e2e8f0; font-variant-numeric: tabular-nums;
+  }
+  .ticker-change { font-size: 11px; margin-top: 1px; font-variant-numeric: tabular-nums; font-weight: 600; }
+  .ticker-change.up   { color: #34d399; }
+  .ticker-change.down { color: #f87171; }
+  .ticker-change.flat { color: #64748b; }
+  .sparkline { width: 100%; height: 26px; margin-top: 6px; display: block; }
+</style>
+
+<script>
+(function() {
+  const grid       = document.getElementById('marketGrid');
+  const empty      = document.getElementById('marketEmpty');
+  const statusEl   = document.getElementById('marketStatus');
+  const pulse      = document.getElementById('marketPulse');
+  const cards      = new Map();
+
+  function ensureCard(payload) {
+    let card = cards.get(payload.route);
+    if (card) return card;
+    if (empty) empty.remove();
+    card = document.createElement('div');
+    card.className = 'ticker-card';
+    card.dataset.route = payload.route;
+    card.innerHTML = `
+      <div class="ticker-route"><span class="orig"></span><span class="arrow">→</span><span class="dest"></span></div>
+      <div class="ticker-price">$0.00</div>
+      <div class="ticker-change flat">—</div>
+      <svg class="sparkline" preserveAspectRatio="none" viewBox="0 0 100 26"></svg>
+    `;
+    card.querySelector('.orig').textContent = payload.origin;
+    card.querySelector('.dest').textContent = payload.destination;
+    grid.appendChild(card);
+    cards.set(payload.route, card);
+    return card;
+  }
+
+  function update(payload) {
+    const card = ensureCard(payload);
+    const priceEl  = card.querySelector('.ticker-price');
+    const changeEl = card.querySelector('.ticker-change');
+
+    const oldP = parseFloat(priceEl.textContent.replace(/[^0-9.\-]/g, '')) || payload.current_price;
+    const newP = payload.current_price;
+
+    priceEl.textContent = '$' + newP.toFixed(2);
+
+    const chg  = payload.change;
+    const pct  = payload.change_pct;
+    const dir  = chg > 0 ? 'up' : chg < 0 ? 'down' : 'flat';
+    const arrow = chg > 0 ? '▲' : chg < 0 ? '▼' : '•';
+    const sign  = chg > 0 ? '+' : '';
+    changeEl.textContent = `${arrow} ${sign}${chg.toFixed(2)} (${sign}${pct.toFixed(2)}%)`;
+    changeEl.className = 'ticker-change ' + dir;
+
+    // Sparkline
+    if (Array.isArray(payload.history) && payload.history.length >= 2) {
+      const h = payload.history;
+      const min = Math.min.apply(null, h);
+      const max = Math.max.apply(null, h);
+      const range = (max - min) || 1;
+      const pts = h.map((p, i) => {
+        const x = (i / (h.length - 1)) * 100;
+        const y = 24 - ((p - min) / range) * 22;
+        return `${x.toFixed(1)},${y.toFixed(1)}`;
+      }).join(' ');
+      const stroke = chg >= 0 ? '#34d399' : '#f87171';
+      card.querySelector('.sparkline').innerHTML =
+        `<polyline points="${pts}" fill="none" stroke="${stroke}" stroke-width="1.4" stroke-linejoin="round" stroke-linecap="round" />`;
+    }
+
+    // Flash on tick (skip on first paint where oldP === newP from snapshot)
+    if (Math.abs(newP - oldP) > 1e-6) {
+      card.classList.remove('flash-up', 'flash-down');
+      void card.offsetWidth; // restart animation
+      card.classList.add(newP > oldP ? 'flash-up' : 'flash-down');
+      setTimeout(() => card.classList.remove('flash-up', 'flash-down'), 900);
+    }
+  }
+
+  function setLive(on) {
+    if (on) {
+      statusEl.textContent = 'LIVE';
+      pulse.classList.remove('bg-red-500');
+      pulse.classList.add('bg-emerald-400');
+    } else {
+      statusEl.textContent = 'RECONNECTING…';
+      pulse.classList.remove('bg-emerald-400');
+      pulse.classList.add('bg-red-500');
+    }
+  }
+
+  let ws;
+  function connect() {
+    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    ws = new WebSocket(`${proto}//${location.host}/ws/ticker`);
+    ws.onopen    = () => setLive(true);
+    ws.onclose   = () => { setLive(false); setTimeout(connect, 2000); };
+    ws.onerror   = () => ws.close();
+    ws.onmessage = (e) => {
+      let msg;
+      try { msg = JSON.parse(e.data); } catch { return; }
+      if (msg.type === 'market' && msg.route) update(msg);
+    };
+  }
+  connect();
+})();
+</script>
+
+
+<!-- ============================================================ -->
+<!-- HERO                                                          -->
+<!-- ============================================================ -->
 <section class="max-w-5xl mx-auto px-6 py-24 text-center">
     <div class="inline-flex items-center gap-2 bg-blue-50 text-blue-700 text-sm font-medium px-4 py-1.5 rounded-full mb-8">
         <span class="w-2 h-2 bg-blue-500 rounded-full animate-pulse"></span>
