@@ -55,8 +55,6 @@ def main():
     bot = RYDEBot(
         adapters=adapters,
         db_path=os.getenv("RYDE_DB_PATH", "ryde.db"),
-        strike_threshold=float(os.getenv("STRIKE_THRESHOLD", "72")),
-        phantom_hold_threshold=float(os.getenv("PHANTOM_HOLD_THRESHOLD", "48")),
     )
 
     monitor = PriceMonitor(
