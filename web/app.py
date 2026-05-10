@@ -9,10 +9,12 @@ from fastapi.templating import Jinja2Templates
 
 from ryde.models import Booking, Passenger
 from ryde.store import BookingStore
+from .api_v1 import router as api_v1_router
 from .client_store import ClientStore
 from .stripe_client import StripeClient
 
 app = FastAPI(title="RYDE")
+app.include_router(api_v1_router)
 templates = Jinja2Templates(directory="web/templates")
 
 _db_path = os.getenv("RYDE_DB_PATH", "ryde.db")
