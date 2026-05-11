@@ -1,0 +1,188 @@
+{% extends "base.html" %}
+
+{% block content %}
+
+<!-- Hero -->
+<section class="max-w-5xl mx-auto px-6 py-24 text-center">
+    <div class="inline-flex items-center gap-2 bg-blue-50 text-blue-700 text-sm font-medium px-4 py-1.5 rounded-full mb-8">
+        <span class="w-2 h-2 bg-blue-500 rounded-full animate-pulse"></span>
+        PRISM engine running
+    </div>
+    <h1 class="text-5xl font-extrabold tracking-tight text-gray-900 mb-6 leading-tight">
+        Every fare drop,<br>
+        <span class="text-blue-600">yours to act on.</span>
+    </h1>
+    <p class="text-xl text-gray-500 max-w-2xl mx-auto mb-10">
+        RYDE's PRISM engine monitors every booking your agency holds and fires a webhook
+        the moment a lower fare is worth chasing.
+        <strong class="text-gray-700">You execute in your GDS. You keep 100% of the savings.</strong>
+    </p>
+    <div class="flex flex-col sm:flex-row gap-4 justify-center">
+        <a href="/signup" class="inline-block bg-blue-600 text-white font-semibold text-lg px-8 py-4 rounded-xl hover:bg-blue-700 transition-colors shadow-lg shadow-blue-100">
+            Start free &rarr;
+        </a>
+        <a href="/pricing" class="inline-block bg-white text-gray-700 font-semibold text-lg px-8 py-4 rounded-xl border border-gray-200 hover:border-gray-300 transition-colors">
+            See pricing
+        </a>
+    </div>
+    <p class="text-sm text-gray-400 mt-4">Free plan &nbsp;&middot;&nbsp; No credit card required &nbsp;&middot;&nbsp; 5 bookings included</p>
+</section>
+
+<!-- How it works -->
+<section class="bg-gray-50 py-20">
+    <div class="max-w-5xl mx-auto px-6">
+        <h2 class="text-3xl font-bold text-center mb-4">How it works</h2>
+        <p class="text-center text-gray-500 mb-16 max-w-xl mx-auto">No airline API needed. No GDS access required. Your agency stays in control.</p>
+        <div class="grid grid-cols-1 md:grid-cols-4 gap-10 text-center">
+            <div>
+                <div class="text-4xl mb-4">&#128273;</div>
+                <h3 class="font-semibold text-lg mb-2">1. Get your key</h3>
+                <p class="text-gray-500 text-sm">Sign up for a free API key. Takes 30 seconds, no credit card.</p>
+            </div>
+            <div>
+                <div class="text-4xl mb-4">&#128203;</div>
+                <h3 class="font-semibold text-lg mb-2">2. Submit bookings</h3>
+                <p class="text-gray-500 text-sm">POST your booking details to our API. PRISM starts monitoring immediately.</p>
+            </div>
+            <div>
+                <div class="text-4xl mb-4">&#128225;</div>
+                <h3 class="font-semibold text-lg mb-2">3. Push fare updates</h3>
+                <p class="text-gray-500 text-sm">PATCH current prices as you see them. PRISM runs Monte Carlo analysis on every update.</p>
+            </div>
+            <div>
+                <div class="text-4xl mb-4">&#9889;</div>
+                <h3 class="font-semibold text-lg mb-2">4. Act on the signal</h3>
+                <p class="text-gray-500 text-sm">Receive a STRIKE webhook. Rebook in your GDS. The savings are 100% yours.</p>
+            </div>
+        </div>
+    </div>
+</section>
+
+<!-- What PRISM does -->
+<section class="max-w-5xl mx-auto px-6 py-20">
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-12 items-center">
+        <div>
+            <div class="inline-flex items-center gap-2 bg-purple-50 text-purple-700 text-xs font-semibold px-3 py-1 rounded-full mb-4">PRISM ENGINE</div>
+            <h2 class="text-3xl font-bold mb-4">Not just price alerts.<br>Optimal stopping.</h2>
+            <p class="text-gray-500 mb-6">Most tools alert you when any price drops. PRISM runs 5,000 Monte Carlo price path simulations using Longstaff-Schwartz backward induction to answer a harder question:</p>
+            <p class="text-gray-800 font-semibold text-lg mb-6">&ldquo;Given this price right now, will waiting likely produce a better one &mdash; or is this as good as it gets?&rdquo;</p>
+            <p class="text-gray-500">Only when PRISM is statistically confident a fare is worth taking does it fire a <span class="font-mono bg-gray-100 text-sm px-1.5 py-0.5 rounded">STRIKE</span> webhook. Fewer false alarms. More meaningful signals.</p>
+        </div>
+        <div class="bg-gray-900 rounded-2xl p-6 text-sm font-mono overflow-x-auto">
+            <p class="text-gray-400 mb-4">// Webhook payload on STRIKE</p>
+            <pre class="text-green-400 leading-relaxed">{
+  "event": "ryde.decision",
+  "action": "STRIKE",
+  "booking_id": "bkg_abc123",
+  "current_price": 530.00,
+  "original_price": 850.00,
+  "net_savings": 320.00,
+  "confidence_score": 0.87,
+  "seats_remaining": 3
+}</pre>
+        </div>
+    </div>
+</section>
+
+<!-- Pricing preview -->
+<section class="bg-gray-50 py-20">
+    <div class="max-w-5xl mx-auto px-6">
+        <h2 class="text-3xl font-bold text-center mb-4">Simple, flat subscription pricing</h2>
+        <p class="text-center text-gray-500 mb-12 max-w-xl mx-auto">No per-transaction fees. No success commissions. One monthly subscription while your agency grows.</p>
+
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-6 max-w-4xl mx-auto mb-10">
+
+            <!-- Free -->
+            <div class="bg-white rounded-2xl p-6 border border-gray-200">
+                <p class="font-semibold text-gray-700 mb-1">Free</p>
+                <p class="text-4xl font-extrabold mb-1">$0</p>
+                <p class="text-sm text-gray-400 mb-6">forever</p>
+                <ul class="space-y-2 text-sm text-gray-600 mb-8">
+                    <li>&#10003; 5 active bookings</li>
+                    <li>&#10003; PRISM webhook signals</li>
+                    <li>&#10003; Full API access</li>
+                    <li>&#10003; HMAC-signed webhooks</li>
+                </ul>
+                <a href="/signup" class="block text-center border border-gray-300 text-gray-700 font-medium py-2.5 rounded-xl hover:border-gray-400 transition-colors text-sm">
+                    Start free &rarr;
+                </a>
+            </div>
+
+            <!-- Starter -->
+            <div class="bg-white rounded-2xl p-6 border border-gray-200">
+                <p class="font-semibold text-gray-700 mb-1">Starter</p>
+                <p class="text-4xl font-extrabold mb-1">$49</p>
+                <p class="text-sm text-gray-400 mb-6">per month</p>
+                <ul class="space-y-2 text-sm text-gray-600 mb-8">
+                    <li>&#10003; 100 active bookings</li>
+                    <li>&#10003; PRISM webhook signals</li>
+                    <li>&#10003; Time-decay scan cadence</li>
+                    <li>&#10003; Audit log &amp; analytics</li>
+                </ul>
+                <a href="/pricing" class="block text-center bg-blue-600 text-white font-medium py-2.5 rounded-xl hover:bg-blue-700 transition-colors text-sm">
+                    Get Starter &rarr;
+                </a>
+            </div>
+
+            <!-- Pro -->
+            <div class="bg-white rounded-2xl p-6 border border-purple-300 relative">
+                <div class="absolute -top-3 left-1/2 -translate-x-1/2 bg-purple-600 text-white text-xs font-semibold px-3 py-1 rounded-full whitespace-nowrap">MOST POPULAR</div>
+                <p class="font-semibold text-gray-700 mb-1">Pro</p>
+                <p class="text-4xl font-extrabold mb-1">$149</p>
+                <p class="text-sm text-gray-400 mb-6">per month</p>
+                <ul class="space-y-2 text-sm text-gray-600 mb-8">
+                    <li>&#10003; Unlimited bookings</li>
+                    <li>&#10003; PRISM webhook signals</li>
+                    <li>&#10003; Priority scan frequency</li>
+                    <li>&#10003; Dedicated support</li>
+                </ul>
+                <a href="/pricing" class="block text-center bg-purple-600 text-white font-medium py-2.5 rounded-xl hover:bg-purple-700 transition-colors text-sm">
+                    Get Pro &rarr;
+                </a>
+            </div>
+
+        </div>
+
+        <p class="text-center text-sm text-gray-400">
+            <a href="/pricing" class="text-blue-600 hover:underline">View full pricing details &rarr;</a>
+        </p>
+    </div>
+</section>
+
+<!-- FAQ -->
+<section class="max-w-3xl mx-auto px-6 py-20">
+    <h2 class="text-3xl font-bold text-center mb-12">Questions</h2>
+    <div class="space-y-4">
+        <div class="bg-white rounded-xl p-6 border border-gray-100">
+            <h3 class="font-semibold mb-1">Do you access our GDS or airline systems?</h3>
+            <p class="text-gray-500 text-sm">No. RYDE is signal-only. You push fare prices to us via PATCH requests, PRISM evaluates them, and we fire a webhook when you should act. Your agency executes the rebook in your own GDS. We never touch your reservation system.</p>
+        </div>
+        <div class="bg-white rounded-xl p-6 border border-gray-100">
+            <h3 class="font-semibold mb-1">What is a PRISM signal?</h3>
+            <p class="text-gray-500 text-sm">A webhook we send to your system when PRISM's Monte Carlo analysis determines a current fare is worth rebooking (STRIKE) or likely to fall further (PHANTOM_HOLD). Both carry a confidence score so you can filter by threshold.</p>
+        </div>
+        <div class="bg-white rounded-xl p-6 border border-gray-100">
+            <h3 class="font-semibold mb-1">How do I send fare prices to RYDE?</h3>
+            <p class="text-gray-500 text-sm">Send a PATCH to <span class="font-mono bg-gray-100 text-xs px-1.5 py-0.5 rounded">/v1/bookings/{id}</span> with <span class="font-mono bg-gray-100 text-xs px-1.5 py-0.5 rounded">current_price</span> and <span class="font-mono bg-gray-100 text-xs px-1.5 py-0.5 rounded">seats_remaining</span>. Call this whenever your fare search results update. See the <a href="/api" class="text-blue-600 hover:underline">API docs</a>.</p>
+        </div>
+        <div class="bg-white rounded-xl p-6 border border-gray-100">
+            <h3 class="font-semibold mb-1">What happens if my subscription lapses?</h3>
+            <p class="text-gray-500 text-sm">Your API key is suspended immediately. Monitoring stops and no webhooks are fired. Resume your subscription and the key reactivates automatically within seconds.</p>
+        </div>
+        <div class="bg-white rounded-xl p-6 border border-gray-100">
+            <h3 class="font-semibold mb-1">Can I test before committing to a paid plan?</h3>
+            <p class="text-gray-500 text-sm">Yes. The free plan includes 5 bookings with full PRISM access &mdash; no credit card required. It's the same API as paid plans, just capped at 5 concurrent monitored bookings.</p>
+        </div>
+    </div>
+</section>
+
+<!-- Bottom CTA -->
+<section class="bg-gray-900 py-24 text-center">
+    <h2 class="text-3xl font-bold text-white mb-4">Ready to capture every fare drop?</h2>
+    <p class="text-gray-400 mb-8 max-w-xl mx-auto">Start with 5 free bookings. No credit card. Full PRISM access.</p>
+    <a href="/signup" class="inline-block bg-blue-600 text-white font-semibold text-lg px-8 py-4 rounded-xl hover:bg-blue-700 transition-colors">
+        Get your free API key &rarr;
+    </a>
+</section>
+
+{% endblock %}

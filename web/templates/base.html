@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}RYDE &mdash; Fare Intelligence for Travel Agencies{% endblock %}</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <style>body { font-family: 'Inter', sans-serif; }</style>
+    {% block head %}{% endblock %}
+</head>
+<body class="bg-white text-gray-900 min-h-screen flex flex-col">
+
+    <nav class="border-b border-gray-100 px-6 py-4">
+        <div class="max-w-5xl mx-auto flex justify-between items-center">
+            <a href="/" class="font-bold text-blue-600 text-lg tracking-tight">R.Y.D.E.</a>
+            <div class="flex items-center gap-6">
+                <a href="/pricing" class="text-sm text-gray-500 hover:text-gray-900 transition-colors">Pricing</a>
+                <a href="/api" class="text-sm text-gray-500 hover:text-gray-900 transition-colors">API Docs</a>
+                <a href="/pricing" class="bg-blue-600 text-white text-sm font-medium px-4 py-2 rounded-lg hover:bg-blue-700 transition-colors">
+                    Get started &rarr;
+                </a>
+            </div>
+        </div>
+    </nav>
+
+    <main class="flex-1">
+        {% block content %}{% endblock %}
+    </main>
+
+    <footer class="border-t border-gray-100 py-8 text-center text-sm text-gray-400">
+        <p>&copy; 2026 R.Y.D.E. &mdash; Precision fare intelligence for travel agencies.</p>
+    </footer>
+
+    {% block scripts %}{% endblock %}
+</body>
+</html>

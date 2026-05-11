@@ -1,0 +1,67 @@
+{% extends "base.html" %}
+{% block title %}Setting up your account &mdash; RYDE{% endblock %}
+
+{% block content %}
+<div class="max-w-md mx-auto px-6 py-24 text-center">
+
+    <div id="spinner" class="mb-8">
+        <div class="inline-block w-12 h-12 border-4 border-blue-200 border-t-blue-600 rounded-full animate-spin"></div>
+    </div>
+
+    <h1 class="text-2xl font-bold mb-2">Activating your account&hellip;</h1>
+    <p id="status-text" class="text-gray-500">Confirming your subscription with LemonSqueezy.</p>
+
+    <div id="error-box" class="hidden mt-8 bg-red-50 border border-red-200 rounded-xl p-6">
+        <p class="text-red-700 font-semibold mb-2">Activation is taking longer than expected.</p>
+        <p class="text-red-600 text-sm mb-4">Your subscription was recorded. Your API key will arrive by email once the webhook fires.</p>
+        <a href="mailto:support@ryde.dev" class="text-blue-600 hover:underline text-sm">Contact support</a>
+    </div>
+
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const agencyId = "{{ agency_id }}";
+
+function delay(attempt) {
+    return (3 + Math.pow(attempt, 1.5)) * 1000;
+}
+
+function poll(attempt) {
+    if (attempt > 10) {
+        document.getElementById('spinner').classList.add('hidden');
+        document.getElementById('error-box').classList.remove('hidden');
+        document.getElementById('status-text').textContent = 'This is taking longer than expected.';
+        return;
+    }
+
+    document.getElementById('status-text').textContent =
+        attempt === 0
+            ? 'Confirming your subscription…'
+            : 'Checking again… (attempt ' + (attempt + 1) + ')';
+
+    fetch('/api/agency-status/' + agencyId)
+        .then(function(r) {
+            if (r.status === 429) {
+                setTimeout(function() { poll(attempt + 1); }, delay(attempt) * 2);
+                return null;
+            }
+            return r.json();
+        })
+        .then(function(data) {
+            if (!data) return;
+            if (data.status === 'active') {
+                window.location.href = '/welcome/key/' + agencyId;
+            } else {
+                setTimeout(function() { poll(attempt + 1); }, delay(attempt));
+            }
+        })
+        .catch(function() {
+            setTimeout(function() { poll(attempt + 1); }, delay(attempt));
+        });
+}
+
+setTimeout(function() { poll(0); }, 3000);
+</script>
+{% endblock %}

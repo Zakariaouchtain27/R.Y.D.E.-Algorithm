@@ -1,0 +1,117 @@
+{% extends "base.html" %}
+{% block title %}Pricing &mdash; RYDE{% endblock %}
+
+{% block content %}
+<div class="max-w-5xl mx-auto px-6 py-16">
+
+    <div class="text-center mb-16">
+        <h1 class="text-4xl font-extrabold mb-4">Simple, transparent pricing</h1>
+        <p class="text-gray-500 max-w-xl mx-auto">One flat monthly fee. No per-transaction charges. No success commissions. Cancel anytime.</p>
+    </div>
+
+    <div class="grid grid-cols-1 md:grid-cols-3 gap-8 max-w-4xl mx-auto mb-16">
+
+        <!-- Free -->
+        <div class="bg-white rounded-2xl p-8 border border-gray-200 flex flex-col">
+            <div class="mb-6">
+                <p class="font-bold text-gray-800 mb-2">Free</p>
+                <div class="flex items-baseline gap-1">
+                    <span class="text-5xl font-extrabold">$0</span>
+                    <span class="text-gray-400">/mo</span>
+                </div>
+                <p class="text-sm text-gray-400 mt-1">No credit card required</p>
+            </div>
+            <ul class="space-y-3 text-sm text-gray-600 mb-8 flex-1">
+                <li class="flex items-center gap-2"><span class="text-green-500">&#10003;</span> 5 active monitored bookings</li>
+                <li class="flex items-center gap-2"><span class="text-green-500">&#10003;</span> PRISM STRIKE &amp; PHANTOM_HOLD signals</li>
+                <li class="flex items-center gap-2"><span class="text-green-500">&#10003;</span> HMAC-signed webhooks</li>
+                <li class="flex items-center gap-2"><span class="text-green-500">&#10003;</span> Full REST API access</li>
+                <li class="flex items-center gap-2"><span class="text-green-500">&#10003;</span> Idempotency support</li>
+                <li class="flex items-center gap-2 text-gray-300"><span>&mdash;</span> Background auto-scan</li>
+                <li class="flex items-center gap-2 text-gray-300"><span>&mdash;</span> Audit log</li>
+            </ul>
+            <a href="/signup" class="block text-center border-2 border-gray-300 text-gray-700 font-semibold py-3 rounded-xl hover:border-gray-400 transition-colors">
+                Start for free &rarr;
+            </a>
+        </div>
+
+        <!-- Starter -->
+        <div class="bg-white rounded-2xl p-8 border border-gray-200 flex flex-col">
+            <div class="mb-6">
+                <p class="font-bold text-gray-800 mb-2">Starter</p>
+                <div class="flex items-baseline gap-1">
+                    <span class="text-5xl font-extrabold">$49</span>
+                    <span class="text-gray-400">/mo</span>
+                </div>
+                <p class="text-sm text-gray-400 mt-1">Billed monthly, cancel anytime</p>
+            </div>
+            <ul class="space-y-3 text-sm text-gray-600 mb-8 flex-1">
+                <li class="flex items-center gap-2"><span class="text-green-500">&#10003;</span> 100 active monitored bookings</li>
+                <li class="flex items-center gap-2"><span class="text-green-500">&#10003;</span> PRISM STRIKE &amp; PHANTOM_HOLD signals</li>
+                <li class="flex items-center gap-2"><span class="text-green-500">&#10003;</span> HMAC-signed webhooks</li>
+                <li class="flex items-center gap-2"><span class="text-green-500">&#10003;</span> Full REST API access</li>
+                <li class="flex items-center gap-2"><span class="text-green-500">&#10003;</span> Background auto-scan (15-min cadence)</li>
+                <li class="flex items-center gap-2"><span class="text-green-500">&#10003;</span> Time-decay scan frequency</li>
+                <li class="flex items-center gap-2 text-gray-300"><span>&mdash;</span> Dedicated support</li>
+            </ul>
+            <a href="{{ ls_starter_url or '/pricing' }}" class="block text-center bg-blue-600 text-white font-semibold py-3 rounded-xl hover:bg-blue-700 transition-colors">
+                Get Starter &rarr;
+            </a>
+        </div>
+
+        <!-- Pro -->
+        <div class="bg-white rounded-2xl p-8 border-2 border-purple-400 flex flex-col relative">
+            <div class="absolute -top-4 left-1/2 -translate-x-1/2 bg-purple-600 text-white text-xs font-bold px-4 py-1.5 rounded-full tracking-wide whitespace-nowrap">MOST POPULAR</div>
+            <div class="mb-6">
+                <p class="font-bold text-gray-800 mb-2">Pro</p>
+                <div class="flex items-baseline gap-1">
+                    <span class="text-5xl font-extrabold">$149</span>
+                    <span class="text-gray-400">/mo</span>
+                </div>
+                <p class="text-sm text-gray-400 mt-1">Billed monthly, cancel anytime</p>
+            </div>
+            <ul class="space-y-3 text-sm text-gray-600 mb-8 flex-1">
+                <li class="flex items-center gap-2"><span class="text-green-500">&#10003;</span> Unlimited monitored bookings</li>
+                <li class="flex items-center gap-2"><span class="text-green-500">&#10003;</span> PRISM STRIKE &amp; PHANTOM_HOLD signals</li>
+                <li class="flex items-center gap-2"><span class="text-green-500">&#10003;</span> HMAC-signed webhooks</li>
+                <li class="flex items-center gap-2"><span class="text-green-500">&#10003;</span> Full REST API access</li>
+                <li class="flex items-center gap-2"><span class="text-green-500">&#10003;</span> Background auto-scan (15-min cadence)</li>
+                <li class="flex items-center gap-2"><span class="text-green-500">&#10003;</span> Time-decay scan frequency</li>
+                <li class="flex items-center gap-2"><span class="text-green-500">&#10003;</span> Dedicated support</li>
+            </ul>
+            <a href="{{ ls_pro_url or '/pricing' }}" class="block text-center bg-purple-600 text-white font-semibold py-3 rounded-xl hover:bg-purple-700 transition-colors">
+                Get Pro &rarr;
+            </a>
+        </div>
+
+    </div>
+
+    <!-- FAQ -->
+    <div class="max-w-2xl mx-auto">
+        <h2 class="text-2xl font-bold text-center mb-8">Pricing FAQ</h2>
+        <div class="space-y-6">
+            <div class="border-b border-gray-100 pb-6">
+                <h3 class="font-semibold mb-2">Do you charge per webhook or per rebook?</h3>
+                <p class="text-gray-500 text-sm">No. The monthly subscription covers everything &mdash; unlimited webhook fires, unlimited PRISM evaluations. You pay a flat fee regardless of how many signals you receive or rebooks you execute.</p>
+            </div>
+            <div class="border-b border-gray-100 pb-6">
+                <h3 class="font-semibold mb-2">Why start with the free plan?</h3>
+                <p class="text-gray-500 text-sm">It's the full product, capped at 5 bookings. Run it on your highest-value bookings first to verify the signals work end-to-end in your environment before scaling up.</p>
+            </div>
+            <div class="border-b border-gray-100 pb-6">
+                <h3 class="font-semibold mb-2">What happens if I exceed my booking limit?</h3>
+                <p class="text-gray-500 text-sm">New submissions return a 402 with a clear error message. Your existing monitored bookings continue uninterrupted. Upgrade your plan to add more capacity.</p>
+            </div>
+            <div class="border-b border-gray-100 pb-6">
+                <h3 class="font-semibold mb-2">What counts as an "active" booking?</h3>
+                <p class="text-gray-500 text-sm">Any booking currently being monitored by PRISM (submitted and not yet departed or cancelled). Bookings are automatically retired after the departure date.</p>
+            </div>
+            <div class="pb-6">
+                <h3 class="font-semibold mb-2">Is there an annual billing option?</h3>
+                <p class="text-gray-500 text-sm">Not yet &mdash; monthly only for now. We'll add annual billing with a discount once we exit beta.</p>
+            </div>
+        </div>
+    </div>
+
+</div>
+{% endblock %}

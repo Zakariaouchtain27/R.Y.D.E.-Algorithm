@@ -1,0 +1,67 @@
+{% extends "base.html" %}
+{% block title %}Your API key &mdash; RYDE{% endblock %}
+
+{% block content %}
+<div class="max-w-lg mx-auto px-6 py-16">
+
+    <div class="text-center mb-10">
+        <div class="text-5xl mb-4">&#127881;</div>
+        <h1 class="text-3xl font-bold mb-2">You're in.</h1>
+        <p class="text-gray-500">Your free API key is ready. Save it &mdash; we won't show it again.</p>
+    </div>
+
+    <div class="bg-amber-50 border border-amber-200 rounded-xl p-4 text-sm text-amber-800 mb-6">
+        <strong>Save this key now.</strong> For security, we don't store your plaintext key. If you lose it, you'll need to generate a new one.
+    </div>
+
+    <div class="bg-gray-900 rounded-2xl p-6 mb-6">
+        <div class="flex items-center justify-between mb-3">
+            <div class="flex gap-2">
+                <span class="bg-green-500 text-white text-xs font-bold px-2 py-0.5 rounded">FREE PLAN</span>
+            </div>
+            <button id="copy-btn" onclick="copyKey()" class="text-xs text-gray-400 hover:text-white transition-colors">Copy</button>
+        </div>
+        <p id="api-key" class="font-mono text-green-400 text-sm break-all select-all">{{ api_key }}</p>
+    </div>
+
+    <div class="bg-white border border-gray-100 rounded-2xl p-6 mb-6">
+        <h2 class="font-semibold mb-3 text-sm">Quick start</h2>
+        <pre class="bg-gray-50 rounded-xl p-4 text-xs font-mono text-gray-700 overflow-x-auto whitespace-pre-wrap"># Submit your first booking
+curl -X POST https://api.ryde.dev/v1/bookings/monitor \
+  -H "X-Agency-Key: {{ api_key }}" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "booking_id": "my-ref-001",
+    "origin": "JFK",
+    "destination": "CDG",
+    "departure_date": "2026-09-15",
+    "original_price": 850.00,
+    "cancellation_fee": 50.00,
+    "webhook_url": "https://your-agency.com/webhook/ryde"
+  }'</pre>
+    </div>
+
+    <div class="flex gap-4">
+        <a href="/api" class="flex-1 text-center border border-gray-200 text-gray-700 font-medium py-3 rounded-xl hover:border-gray-300 transition-colors text-sm">
+            Read the docs &rarr;
+        </a>
+        <a href="/pricing" class="flex-1 text-center bg-purple-600 text-white font-medium py-3 rounded-xl hover:bg-purple-700 transition-colors text-sm">
+            Upgrade plan
+        </a>
+    </div>
+
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function copyKey() {
+    const key = document.getElementById('api-key').textContent.trim();
+    navigator.clipboard.writeText(key).then(() => {
+        const btn = document.getElementById('copy-btn');
+        btn.textContent = 'Copied!';
+        setTimeout(() => { btn.textContent = 'Copy'; }, 2000);
+    });
+}
+</script>
+{% endblock %}
