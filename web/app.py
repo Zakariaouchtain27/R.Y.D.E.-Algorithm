@@ -12,12 +12,14 @@ from ryde import events as ryde_events
 from ryde.live_market import get_market
 from ryde.models import Booking, Passenger
 from ryde.store import BookingStore
+from .admin import router as admin_router
 from .api_v1 import router as api_v1_router
 from .client_store import ClientStore
 from .stripe_client import StripeClient
 
 app = FastAPI(title="RYDE")
 app.include_router(api_v1_router)
+app.include_router(admin_router)
 templates = Jinja2Templates(directory="web/templates")
 
 _db_path = os.getenv("RYDE_DB_PATH", "ryde.db")
@@ -79,10 +81,6 @@ _market_task: Optional[asyncio.Task] = None
 
 
 def _on_ryde_event(event: dict) -> None:
-    """
-    Bridges any thread → FastAPI event loop.
-    Called by ryde.events.publish() (sync, may be on a worker thread).
-    """
     if _loop is None or _loop.is_closed():
         return
     asyncio.run_coroutine_threadsafe(_manager.broadcast(event), _loop)
@@ -108,15 +106,10 @@ async def _shutdown() -> None:
 async def ws_ticker(ws: WebSocket):
     await _manager.connect(ws)
     try:
-        await ws.send_json({
-            "type": "hello",
-            "timestamp": datetime.utcnow().isoformat() + "Z",
-        })
-        # Send current market state so newly opened pages populate instantly.
+        await ws.send_json({"type": "hello", "timestamp": datetime.utcnow().isoformat() + "Z"})
         for snap in get_market().snapshot():
             await ws.send_json(snap)
         while True:
-            # Drain client → server messages so the connection stays open.
             await ws.receive_text()
     except WebSocketDisconnect:
         await _manager.disconnect(ws)
@@ -157,7 +150,6 @@ async def register_submit(
 ):
     client_id = str(uuid.uuid4())
     customer = _get_stripe().create_customer(email=email, name=name)
-
     _clients.create_client(
         client_id=client_id,
         name=name,
@@ -181,7 +173,6 @@ async def setup_payment_page(request: Request, client_id: str):
     client = _clients.get_client(client_id)
     if not client:
         raise HTTPException(status_code=404)
-
     setup_intent = _get_stripe().create_setup_intent(client["stripe_customer_id"])
     return templates.TemplateResponse(request, "payment.html", {
         "client_id": client_id,
@@ -192,17 +183,12 @@ async def setup_payment_page(request: Request, client_id: str):
 
 
 @app.post("/setup-payment/{client_id}/confirm")
-async def confirm_setup(
-    client_id: str,
-    payment_method_id: str = Form(...),
-):
+async def confirm_setup(client_id: str, payment_method_id: str = Form(...)):
     client = _clients.get_client(client_id)
     if not client:
         raise HTTPException(status_code=404)
-
     _clients.save_payment_method(client_id, payment_method_id)
     _clients.activate_monitoring(client_id)
-
     bd = client["booking_data"]
     name_parts = client["name"].split()
     booking = Booking(
@@ -227,7 +213,6 @@ async def confirm_setup(
         notify_webhook=f"{_BASE_URL}/webhook/ryde",
     )
     _bookings.upsert(booking)
-
     return RedirectResponse(f"/success/{client_id}", status_code=303)
 
 
@@ -236,9 +221,7 @@ async def success_page(request: Request, client_id: str):
     client = _clients.get_client(client_id)
     if not client:
         raise HTTPException(status_code=404)
-    return templates.TemplateResponse(request, "success.html", {
-        "client": client,
-    })
+    return templates.TemplateResponse(request, "success.html", {"client": client})
 
 
 @app.get("/dashboard/{client_id}", response_class=HTMLResponse)
@@ -246,11 +229,8 @@ async def dashboard(request: Request, client_id: str):
     client = _clients.get_client(client_id)
     if not client:
         raise HTTPException(status_code=404)
-    events = _clients.get_events(client_id)
-    return templates.TemplateResponse(request, "dashboard.html", {
-        "client": client,
-        "events": events,
-    })
+    ev = _clients.get_events(client_id)
+    return templates.TemplateResponse(request, "dashboard.html", {"client": client, "events": ev})
 
 
 @app.post("/webhook/ryde")
@@ -258,7 +238,6 @@ async def ryde_webhook(request: Request):
     payload = await request.json()
     event = payload.get("event")
     booking_id = payload.get("booking_id")
-
     if event == "ryde.rebooking" and payload.get("success"):
         savings = float(payload.get("savings_realized", 0))
         client = _clients.get_client(booking_id)
@@ -274,8 +253,6 @@ async def ryde_webhook(request: Request):
                 _clients.add_savings(booking_id, savings)
             except Exception as exc:
                 print(f"[ryde.webhook] Stripe charge failed: {exc}")
-
     if booking_id:
         _clients.log_event(booking_id, event, payload)
-
     return {"ok": True}

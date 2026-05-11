@@ -1,0 +1,312 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>RYDE Admin — Agency Management</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <style>
+    :root {
+      --bg:#0a0e14; --panel:#0f141c; --row:#121822; --row-alt:#0d121a;
+      --border:#1c2433; --text:#d6e2f0; --muted:#6b7a8f;
+      --green:#00ff8b; --red:#ff4d6d; --amber:#ffb000; --blue:#4ea8ff;
+      --mono:'SF Mono','JetBrains Mono',Menlo,Consolas,monospace;
+    }
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{background:var(--bg);color:var(--text);font-family:var(--mono);font-size:13px;min-height:100vh}
+    header{display:flex;justify-content:space-between;align-items:center;padding:12px 24px;
+           border-bottom:1px solid var(--border);background:var(--panel)}
+    header .title{font-weight:700;letter-spacing:2px;color:var(--amber)}
+    header .title small{color:var(--muted);font-weight:400;margin-left:10px;letter-spacing:1px}
+    #lockscreen{display:flex;flex-direction:column;align-items:center;justify-content:center;
+                height:80vh;gap:16px}
+    #lockscreen h2{color:var(--amber);letter-spacing:2px}
+    #lockscreen p{color:var(--muted)}
+    #lockscreen input{background:#0f141c;border:1px solid var(--border);color:var(--text);
+                      padding:10px 16px;border-radius:4px;width:320px;font-family:var(--mono);
+                      font-size:13px;letter-spacing:1px}
+    #lockscreen input:focus{outline:none;border-color:var(--blue)}
+    .btn{padding:8px 18px;border:none;border-radius:4px;cursor:pointer;font-family:var(--mono);
+         font-size:12px;font-weight:700;letter-spacing:1px;transition:opacity .15s}
+    .btn:hover{opacity:.85}
+    .btn-blue{background:var(--blue);color:#001428}
+    .btn-green{background:var(--green);color:#001a0d}
+    .btn-red{background:var(--red);color:#1a0009}
+    .btn-amber{background:var(--amber);color:#1a1100}
+    .btn-ghost{background:#1c2433;color:var(--muted)}
+    main{padding:24px}
+    .toolbar{display:flex;justify-content:space-between;align-items:center;margin-bottom:18px}
+    .toolbar h2{letter-spacing:1px;color:var(--text)}
+    .stats{display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:var(--border);
+           border:1px solid var(--border);border-radius:6px;overflow:hidden;margin-bottom:24px}
+    .stat{background:var(--panel);padding:14px 18px}
+    .stat .lbl{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:1.5px}
+    .stat .val{font-size:24px;font-weight:700;margin-top:4px}
+    table{width:100%;border-collapse:collapse}
+    thead th{text-align:left;padding:10px 12px;color:var(--muted);font-weight:500;
+             font-size:11px;text-transform:uppercase;letter-spacing:1.5px;
+             border-bottom:1px solid var(--border);background:var(--panel);position:sticky;top:0}
+    tbody td{padding:10px 12px;border-bottom:1px solid var(--border)}
+    tbody tr{background:var(--row)}
+    tbody tr:nth-child(even){background:var(--row-alt)}
+    .badge{display:inline-block;padding:2px 9px;border-radius:3px;font-size:11px;font-weight:700;letter-spacing:.5px}
+    .badge.live{background:var(--green);color:#001a0d}
+    .badge.test{background:#2a3245;color:var(--muted)}
+    .badge.active{background:rgba(0,255,139,.15);color:var(--green);border:1px solid var(--green)}
+    .badge.revoked{background:rgba(255,77,109,.12);color:var(--red);border:1px solid var(--red)}
+    .key-cell{display:flex;align-items:center;gap:8px}
+    .key-val{font-size:11px;color:var(--blue);letter-spacing:.5px;max-width:280px;
+             overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    .copy-btn{background:none;border:none;cursor:pointer;color:var(--muted);font-size:12px;padding:2px 4px}
+    .copy-btn:hover{color:var(--text)}
+    .actions{display:flex;gap:6px}
+    /* Modal */
+    .overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:100;
+             align-items:center;justify-content:center}
+    .overlay.open{display:flex}
+    .modal{background:var(--panel);border:1px solid var(--border);border-radius:8px;
+           padding:28px;width:420px;max-width:95vw}
+    .modal h3{color:var(--amber);margin-bottom:18px;letter-spacing:1px}
+    .field{margin-bottom:14px}
+    .field label{display:block;color:var(--muted);font-size:11px;text-transform:uppercase;
+                 letter-spacing:1px;margin-bottom:5px}
+    .field input,.field select{width:100%;background:#0a0e14;border:1px solid var(--border);
+      color:var(--text);padding:9px 12px;border-radius:4px;font-family:var(--mono);font-size:13px}
+    .field input:focus,.field select:focus{outline:none;border-color:var(--blue)}
+    .modal-footer{display:flex;justify-content:flex-end;gap:10px;margin-top:20px}
+    .new-key-box{background:#0a0e14;border:1px solid var(--green);border-radius:4px;
+                 padding:14px;margin-top:16px;display:none}
+    .new-key-box .lbl{color:var(--muted);font-size:11px;text-transform:uppercase;
+                      letter-spacing:1px;margin-bottom:6px}
+    .new-key-box .val{color:var(--green);word-break:break-all;font-size:12px;letter-spacing:.5px}
+    .new-key-box .warn{color:var(--amber);font-size:11px;margin-top:8px}
+    #toast{position:fixed;bottom:24px;right:24px;background:var(--panel);border:1px solid var(--border);
+           border-radius:6px;padding:12px 20px;font-size:12px;opacity:0;transition:opacity .3s;
+           pointer-events:none;z-index:200}
+    #toast.show{opacity:1}
+  </style>
+</head>
+<body>
+<header>
+  <div class="title">RYDE ADMIN <small>Agency &amp; Key Management</small></div>
+  <div style="display:flex;align-items:center;gap:14px;color:var(--muted);font-size:12px">
+    <a href="/" style="color:var(--muted);text-decoration:none">Landing</a>
+    <a href="/terminal" style="color:var(--muted);text-decoration:none">Terminal</a>
+    <a href="/docs" style="color:var(--muted);text-decoration:none">API Docs</a>
+  </div>
+</header>
+
+<!-- Lock screen -->
+<div id="lockscreen">
+  <h2>ADMIN ACCESS</h2>
+  <p>Enter your admin secret to continue</p>
+  <input type="password" id="secretInput" placeholder="RYDE_ADMIN_SECRET" />
+  <button class="btn btn-blue" onclick="unlock()">Unlock</button>
+  <p id="lockErr" style="color:var(--red);display:none">Invalid secret.</p>
+</div>
+
+<!-- Main UI (hidden until unlocked) -->
+<main id="mainUI" style="display:none">
+  <div class="stats" id="statsBar">
+    <div class="stat"><div class="lbl">Total Agencies</div><div class="val" id="sTotal">-</div></div>
+    <div class="stat"><div class="lbl">Active</div><div class="val" style="color:var(--green)" id="sActive">-</div></div>
+    <div class="stat"><div class="lbl">Live Keys</div><div class="val" style="color:var(--amber)" id="sLive">-</div></div>
+    <div class="stat"><div class="lbl">Total API Calls</div><div class="val" id="sCalls">-</div></div>
+  </div>
+
+  <div class="toolbar">
+    <h2>Agencies</h2>
+    <button class="btn btn-green" onclick="openCreate()">+ New Agency</button>
+  </div>
+
+  <table>
+    <thead>
+      <tr>
+        <th>Agency</th><th>Email</th><th>API Key</th>
+        <th>Env</th><th>Status</th><th>Calls</th><th>Last Used</th><th>Actions</th>
+      </tr>
+    </thead>
+    <tbody id="agencyTable"><tr><td colspan="8" style="color:var(--muted);text-align:center;padding:40px">Loading…</td></tr></tbody>
+  </table>
+</main>
+
+<!-- Create Agency Modal -->
+<div class="overlay" id="createModal">
+  <div class="modal">
+    <h3>New Agency</h3>
+    <div class="field"><label>Agency Name</label><input type="text" id="newName" placeholder="Acme Travel Inc." /></div>
+    <div class="field"><label>Email</label><input type="email" id="newEmail" placeholder="tech@acmetravel.com" /></div>
+    <div class="field">
+      <label>Environment</label>
+      <select id="newEnv">
+        <option value="test">Test — sandbox only</option>
+        <option value="live">Live — production</option>
+      </select>
+    </div>
+    <div class="new-key-box" id="newKeyBox">
+      <div class="lbl">Generated API Key — copy it now, it won’t be shown again</div>
+      <div class="val" id="newKeyVal"></div>
+      <div style="display:flex;gap:8px;margin-top:10px">
+        <button class="btn btn-amber" onclick="copyKey()">Copy Key</button>
+      </div>
+      <div class="warn">⚠ Store this key securely. It cannot be recovered after closing this dialog.</div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" onclick="closeCreate()">Close</button>
+      <button class="btn btn-green" id="createBtn" onclick="createAgency()">Create Agency</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script>
+  let ADMIN_SECRET = '';
+  let agencyData = [];
+
+  function toast(msg, color) {
+    const el = document.getElementById('toast');
+    el.textContent = msg;
+    el.style.borderColor = color || 'var(--border)';
+    el.classList.add('show');
+    setTimeout(() => el.classList.remove('show'), 2500);
+  }
+
+  async function apiFetch(path, opts = {}) {
+    const res = await fetch(path, {
+      ...opts,
+      headers: { 'X-Admin-Secret': ADMIN_SECRET, 'Content-Type': 'application/json', ...(opts.headers || {}) },
+    });
+    if (!res.ok) throw new Error((await res.json()).detail || res.statusText);
+    return res.json();
+  }
+
+  async function unlock() {
+    ADMIN_SECRET = document.getElementById('secretInput').value.trim();
+    try {
+      await apiFetch('/admin/agencies');
+      document.getElementById('lockscreen').style.display = 'none';
+      document.getElementById('mainUI').style.display = 'block';
+      document.getElementById('lockErr').style.display = 'none';
+      loadAgencies();
+    } catch {
+      document.getElementById('lockErr').style.display = 'block';
+      ADMIN_SECRET = '';
+    }
+  }
+  document.getElementById('secretInput').addEventListener('keydown', e => { if (e.key === 'Enter') unlock(); });
+
+  async function loadAgencies() {
+    try {
+      agencyData = await apiFetch('/admin/agencies');
+      renderTable(agencyData);
+      renderStats(agencyData);
+    } catch (e) { toast(e.message, 'var(--red)'); }
+  }
+
+  function renderStats(data) {
+    document.getElementById('sTotal').textContent  = data.length;
+    document.getElementById('sActive').textContent = data.filter(a => a.active).length;
+    document.getElementById('sLive').textContent   = data.filter(a => a.environment === 'live').length;
+    document.getElementById('sCalls').textContent  = data.reduce((s, a) => s + a.total_calls, 0);
+  }
+
+  function renderTable(data) {
+    const tb = document.getElementById('agencyTable');
+    if (!data.length) {
+      tb.innerHTML = '<tr><td colspan="8" style="color:var(--muted);text-align:center;padding:40px">No agencies yet. Create one above.</td></tr>';
+      return;
+    }
+    tb.innerHTML = data.map(a => `
+      <tr>
+        <td style="font-weight:600">${esc(a.name)}</td>
+        <td style="color:var(--muted)">${esc(a.email)}</td>
+        <td>
+          <div class="key-cell">
+            <span class="key-val" title="${esc(a.api_key)}">${esc(a.api_key)}</span>
+            <button class="copy-btn" onclick="copyText('${esc(a.api_key)}')" title="Copy">&#10697;</button>
+          </div>
+        </td>
+        <td><span class="badge ${a.environment}">${a.environment.toUpperCase()}</span></td>
+        <td><span class="badge ${a.active ? 'active' : 'revoked'}">${a.active ? 'ACTIVE' : 'REVOKED'}</span></td>
+        <td style="color:var(--blue)">${a.total_calls.toLocaleString()}</td>
+        <td style="color:var(--muted);font-size:11px">${a.last_call_at ? a.last_call_at.replace('T',' ').slice(0,19) : '—'}</td>
+        <td>
+          <div class="actions">
+            <button class="btn btn-amber" onclick="regen('${a.id}','${esc(a.name)}')">Regen Key</button>
+            ${a.active
+              ? `<button class="btn btn-red" onclick="revoke('${a.id}','${esc(a.name)}')">Revoke</button>`
+              : `<button class="btn btn-green" onclick="reactivate('${a.id}','${esc(a.name)}')">Restore</button>`
+            }
+          </div>
+        </td>
+      </tr>
+    `).join('');
+  }
+
+  function esc(s) { return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+  function copyText(text) {
+    navigator.clipboard.writeText(text).then(() => toast('Copied to clipboard', 'var(--green)'));
+  }
+
+  // ---- Create ----
+  function openCreate() {
+    document.getElementById('newName').value = '';
+    document.getElementById('newEmail').value = '';
+    document.getElementById('newEnv').value = 'test';
+    document.getElementById('newKeyBox').style.display = 'none';
+    document.getElementById('createBtn').style.display = 'inline-block';
+    document.getElementById('createModal').classList.add('open');
+  }
+  function closeCreate() {
+    document.getElementById('createModal').classList.remove('open');
+    loadAgencies();
+  }
+  async function createAgency() {
+    const name = document.getElementById('newName').value.trim();
+    const email = document.getElementById('newEmail').value.trim();
+    const env = document.getElementById('newEnv').value;
+    if (!name || !email) { toast('Name and email required', 'var(--red)'); return; }
+    try {
+      const agency = await apiFetch('/admin/agencies', {
+        method: 'POST',
+        body: JSON.stringify({ name, email, environment: env }),
+      });
+      document.getElementById('newKeyVal').textContent = agency.api_key;
+      document.getElementById('newKeyBox').style.display = 'block';
+      document.getElementById('createBtn').style.display = 'none';
+      toast('Agency created', 'var(--green)');
+    } catch (e) { toast(e.message, 'var(--red)'); }
+  }
+  function copyKey() {
+    const key = document.getElementById('newKeyVal').textContent;
+    copyText(key);
+  }
+
+  // ---- Actions ----
+  async function regen(id, name) {
+    if (!confirm(`Regenerate key for ${name}? The old key will stop working immediately.`)) return;
+    try {
+      const res = await apiFetch(`/admin/agencies/${id}/regenerate`, { method: 'POST' });
+      toast('New key: ' + res.api_key, 'var(--amber)');
+      loadAgencies();
+    } catch (e) { toast(e.message, 'var(--red)'); }
+  }
+  async function revoke(id, name) {
+    if (!confirm(`Revoke access for ${name}? Their API key will stop working immediately.`)) return;
+    try {
+      await apiFetch(`/admin/agencies/${id}`, { method: 'DELETE' });
+      toast(`${name} revoked`, 'var(--red)');
+      loadAgencies();
+    } catch (e) { toast(e.message, 'var(--red)'); }
+  }
+  async function reactivate(id, name) {
+    try {
+      await apiFetch(`/admin/agencies/${id}/reactivate`, { method: 'POST' });
+      toast(`${name} reactivated`, 'var(--green)');
+      loadAgencies();
+    } catch (e) { toast(e.message, 'var(--red)'); }
+  }
+</script>
+</body>
+</html>
