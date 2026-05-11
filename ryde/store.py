@@ -10,9 +10,7 @@ from .models import Booking, Passenger
 class BookingStore:
     """
     SQLite-backed store for active bookings.
-
-    Swap this for Postgres + SQLAlchemy in production.
-    The interface is intentionally minimal so the swap is trivial.
+    Swap for Postgres + SQLAlchemy in production.
     """
 
     def __init__(self, db_path: str = "ryde.db"):
@@ -33,8 +31,10 @@ class BookingStore:
         self._conn.commit()
 
     # ------------------------------------------------------------------
+    # Write
+    # ------------------------------------------------------------------
 
-    def upsert(self, booking: Booking):
+    def upsert(self, booking: Booking) -> None:
         data = json.dumps(self._to_dict(booking))
         with self._lock:
             self._conn.execute(
@@ -48,6 +48,18 @@ class BookingStore:
             )
             self._conn.commit()
 
+    def deactivate(self, booking_id: str) -> None:
+        with self._lock:
+            self._conn.execute(
+                "UPDATE bookings SET active = 0, updated_at = CURRENT_TIMESTAMP WHERE booking_id = ?",
+                (booking_id,),
+            )
+            self._conn.commit()
+
+    # ------------------------------------------------------------------
+    # Read
+    # ------------------------------------------------------------------
+
     def get_active(self) -> List[Booking]:
         with self._lock:
             rows = self._conn.execute(
@@ -55,13 +67,52 @@ class BookingStore:
             ).fetchall()
         return [self._from_dict(json.loads(r[0])) for r in rows]
 
-    def deactivate(self, booking_id: str):
+    def get_by_id(self, booking_id: str) -> Optional[Booking]:
         with self._lock:
-            self._conn.execute(
-                "UPDATE bookings SET active = 0, updated_at = CURRENT_TIMESTAMP WHERE booking_id = ?",
+            row = self._conn.execute(
+                "SELECT data FROM bookings WHERE booking_id = ?",
                 (booking_id,),
-            )
-            self._conn.commit()
+            ).fetchone()
+        return self._from_dict(json.loads(row[0])) if row else None
+
+    def get_by_agency(self, agency: str) -> List[dict]:
+        """Returns raw rows (data + active + timestamps) for a given agency."""
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT data, active, created_at, updated_at
+                FROM bookings
+                WHERE json_extract(data, '$.metadata.agency') = ?
+                ORDER BY created_at DESC
+                """,
+                (agency,),
+            ).fetchall()
+        result = []
+        for row in rows:
+            d = json.loads(row[0])
+            d["_active"] = bool(row[1])
+            d["_created_at"] = row[2]
+            d["_updated_at"] = row[3]
+            result.append(d)
+        return result
+
+    def get_agency_savings(self, agency: str) -> float:
+        """Sum of savings_realized from rebooking_outcomes for this agency's bookings."""
+        with self._lock:
+            try:
+                row = self._conn.execute(
+                    """
+                    SELECT COALESCE(SUM(ro.savings), 0)
+                    FROM rebooking_outcomes ro
+                    JOIN bookings b ON b.booking_id = ro.booking_id
+                    WHERE json_extract(b.data, '$.metadata.agency') = ?
+                    AND ro.success = 1
+                    """,
+                    (agency,),
+                ).fetchone()
+                return float(row[0]) if row else 0.0
+            except Exception:
+                return 0.0
 
     # ------------------------------------------------------------------
     # Serialization

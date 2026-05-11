@@ -1,15 +1,24 @@
 """
-B2B API v1 — lets travel agencies submit bookings for PRISM monitoring.
+RYDE B2B API v1
+===============
+All endpoints require:  X-API-Key: <agency_key>
 
-    POST /api/v1/monitor
-    Header: X-API-Key: <agency key>
-    Body:   { origin, destination, departure_date, original_price, cancellation_fee }
-    Returns: { tracking_id, status }
+Endpoints
+---------
+POST   /api/v1/monitor              Submit a booking for PRISM monitoring
+GET    /api/v1/bookings             List all bookings for your agency
+GET    /api/v1/bookings/{id}        Get a single booking + status
+PATCH  /api/v1/bookings/{id}        Update webhook URL, passenger, or fee
+DELETE /api/v1/bookings/{id}        Stop monitoring a booking
+GET    /api/v1/analytics            Agency-level savings + usage stats
+GET    /api/v1/account              Your agency profile and quota info
 """
 import os
+import time
 import uuid
+from collections import defaultdict
 from datetime import datetime
-from typing import Optional
+from typing import List, Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException, status
 from pydantic import BaseModel, Field, field_validator
@@ -18,19 +27,41 @@ from ryde.agency_store import AgencyStore
 from ryde.models import Booking, Passenger
 from ryde.store import BookingStore
 
-router = APIRouter(prefix="/api/v1", tags=["b2b-v1"])
+router = APIRouter(prefix="/api/v1", tags=["B2B API v1"])
 
-_db_path = os.getenv("RYDE_DB_PATH", "ryde.db")
+_db_path  = os.getenv("RYDE_DB_PATH", "ryde.db")
 _bookings = BookingStore(_db_path)
 _agencies = AgencyStore(_db_path)
 
+# ---------------------------------------------------------------------------
+# Rate limiting  (60 requests / 60 seconds per key, in-memory)
+# ---------------------------------------------------------------------------
+
+_call_log: dict = defaultdict(list)
+_RATE_LIMIT   = 60
+_RATE_WINDOW  = 60  # seconds
+
+
+def _check_rate(api_key: str) -> None:
+    now = time.monotonic()
+    log = _call_log[api_key]
+    _call_log[api_key] = [t for t in log if now - t < _RATE_WINDOW]
+    if len(_call_log[api_key]) >= _RATE_LIMIT:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"Rate limit: {_RATE_LIMIT} requests / {_RATE_WINDOW}s.",
+            headers={"Retry-After": "60"},
+        )
+    _call_log[api_key].append(now)
+
 
 # ---------------------------------------------------------------------------
-# Auth
+# Auth dependency
 # ---------------------------------------------------------------------------
 
-async def require_api_key(x_api_key: Optional[str] = Header(default=None)) -> str:
-    """Validates X-API-Key header, logs the call, returns the agency name."""
+async def require_api_key(
+    x_api_key: Optional[str] = Header(default=None),
+) -> tuple:   # returns (agency_name, raw_key)
     if not x_api_key:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -43,20 +74,54 @@ async def require_api_key(x_api_key: Optional[str] = Header(default=None)) -> st
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Invalid or revoked API key.",
         )
+    _check_rate(x_api_key)
     _agencies.log_call(x_api_key)
-    return agency.name
+    return agency.name, x_api_key
 
 
 # ---------------------------------------------------------------------------
-# Models
+# Shared helpers
+# ---------------------------------------------------------------------------
+
+def _booking_to_response(d: dict) -> dict:
+    """Convert raw booking dict (from get_by_agency) to API response shape."""
+    return {
+        "tracking_id":     d["booking_id"],
+        "route":           f"{d['origin']}-{d['destination']}",
+        "origin":          d["origin"],
+        "destination":     d["destination"],
+        "departure_date":  d["departure_date"][:10],
+        "original_price":  d["original_price"],
+        "cancellation_fee": d["cancellation_fee"],
+        "currency":        d["currency"],
+        "cabin_class":     d.get("cabin_class", "economy"),
+        "status":          "monitoring" if d.get("_active", True) else "stopped",
+        "webhook_url":     d.get("notify_webhook"),
+        "passenger_set":   d["passenger"]["given_name"] != "Pending",
+        "submitted_at":    d.get("_created_at"),
+        "updated_at":      d.get("_updated_at"),
+        "metadata":        d.get("metadata", {}),
+    }
+
+
+def _assert_owns(booking_dict: dict, agency: str) -> None:
+    if booking_dict.get("metadata", {}).get("agency") != agency:
+        raise HTTPException(status_code=404, detail="Booking not found.")
+
+
+# ---------------------------------------------------------------------------
+# POST /monitor  — submit a booking
 # ---------------------------------------------------------------------------
 
 class MonitorRequest(BaseModel):
-    origin: str      = Field(..., min_length=3, max_length=3)
-    destination: str = Field(..., min_length=3, max_length=3)
-    departure_date: str   = Field(..., description="YYYY-MM-DD")
-    original_price: float = Field(..., gt=0)
-    cancellation_fee: float = Field(..., ge=0)
+    origin:           str   = Field(..., min_length=3, max_length=3, description="IATA origin, e.g. JFK")
+    destination:      str   = Field(..., min_length=3, max_length=3, description="IATA destination, e.g. CDG")
+    departure_date:   str   = Field(..., description="YYYY-MM-DD")
+    original_price:   float = Field(..., gt=0,  description="Price paid in USD")
+    cancellation_fee: float = Field(..., ge=0,  description="Fee to cancel + rebook")
+    cabin_class:      str   = Field("economy", description="economy | business | first")
+    webhook_url:      Optional[str] = Field(None, description="POST target for PRISM decisions")
+    reference:        Optional[str] = Field(None, description="Your internal booking reference")
 
     @field_validator("origin", "destination")
     @classmethod
@@ -65,7 +130,7 @@ class MonitorRequest(BaseModel):
 
     @field_validator("departure_date")
     @classmethod
-    def _validate_date(cls, v: str) -> str:
+    def _future(cls, v: str) -> str:
         try:
             dep = datetime.strptime(v, "%Y-%m-%d")
         except ValueError:
@@ -75,33 +140,19 @@ class MonitorRequest(BaseModel):
         return v
 
 
-class MonitorResponse(BaseModel):
-    tracking_id: str
-    status: str
-    agency: str
-    monitored_route: str
-    departure_date: str
-
-
-# ---------------------------------------------------------------------------
-# Endpoint
-# ---------------------------------------------------------------------------
-
-@router.post("/monitor", response_model=MonitorResponse, status_code=201)
+@router.post("/monitor", status_code=201, summary="Submit booking for monitoring")
 async def submit_monitor(
     payload: MonitorRequest,
-    agency: str = Depends(require_api_key),
-) -> MonitorResponse:
+    auth: tuple = Depends(require_api_key),
+):
+    agency, _ = auth
     tracking_id = f"b2b_{uuid.uuid4().hex[:16]}"
 
     booking = Booking(
         booking_id=tracking_id,
         passenger=Passenger(
-            title="mr",
-            given_name="Pending",
-            family_name="Pending",
-            born_on="1990-01-01",
-            gender="m",
+            title="mr", given_name="Pending", family_name="Pending",
+            born_on="1990-01-01", gender="m",
             email=f"noreply+{tracking_id}@b2b.ryde.invalid",
             phone="+10000000000",
         ),
@@ -111,20 +162,190 @@ async def submit_monitor(
         original_price=payload.original_price,
         currency="USD",
         cancellation_fee=payload.cancellation_fee,
+        cabin_class=payload.cabin_class,
         adapter="amadeus",
-        adapter_booking_ref=tracking_id,
+        adapter_booking_ref=payload.reference or tracking_id,
+        notify_webhook=payload.webhook_url,
         metadata={
-            "source": "b2b_api_v1",
-            "agency": agency,
+            "source":       "b2b_api_v1",
+            "agency":       agency,
             "submitted_at": datetime.utcnow().isoformat() + "Z",
         },
     )
     _bookings.upsert(booking)
 
-    return MonitorResponse(
-        tracking_id=tracking_id,
-        status="monitoring",
-        agency=agency,
-        monitored_route=f"{payload.origin}→{payload.destination}",
-        departure_date=payload.departure_date,
+    return {
+        "tracking_id":   tracking_id,
+        "status":        "monitoring",
+        "agency":        agency,
+        "route":         f"{payload.origin}-{payload.destination}",
+        "departure_date": payload.departure_date,
+        "webhook_url":   payload.webhook_url,
+        "submitted_at":  datetime.utcnow().isoformat() + "Z",
+    }
+
+
+# ---------------------------------------------------------------------------
+# GET /bookings  — list all bookings for this agency
+# ---------------------------------------------------------------------------
+
+@router.get("/bookings", summary="List all monitored bookings")
+async def list_bookings(
+    status_filter: Optional[str] = None,   # "monitoring" | "stopped"
+    auth: tuple = Depends(require_api_key),
+):
+    agency, _ = auth
+    rows = _bookings.get_by_agency(agency)
+
+    if status_filter == "monitoring":
+        rows = [r for r in rows if r.get("_active")]
+    elif status_filter == "stopped":
+        rows = [r for r in rows if not r.get("_active")]
+
+    return {
+        "agency":  agency,
+        "count":   len(rows),
+        "bookings": [_booking_to_response(r) for r in rows],
+    }
+
+
+# ---------------------------------------------------------------------------
+# GET /bookings/{id}  — single booking detail
+# ---------------------------------------------------------------------------
+
+@router.get("/bookings/{tracking_id}", summary="Get booking status")
+async def get_booking(
+    tracking_id: str,
+    auth: tuple = Depends(require_api_key),
+):
+    agency, _ = auth
+    rows = _bookings.get_by_agency(agency)
+    match = next((r for r in rows if r["booking_id"] == tracking_id), None)
+    if not match:
+        raise HTTPException(status_code=404, detail="Booking not found.")
+    return _booking_to_response(match)
+
+
+# ---------------------------------------------------------------------------
+# PATCH /bookings/{id}  — update webhook or passenger details
+# ---------------------------------------------------------------------------
+
+class PatchBookingRequest(BaseModel):
+    webhook_url:      Optional[str]   = None
+    cancellation_fee: Optional[float] = Field(None, ge=0)
+    cabin_class:      Optional[str]   = None
+    passenger: Optional[dict] = Field(
+        None,
+        description="Passenger fields: title, given_name, family_name, born_on, gender, email, phone"
     )
+
+
+@router.patch("/bookings/{tracking_id}", summary="Update booking details")
+async def patch_booking(
+    tracking_id: str,
+    payload: PatchBookingRequest,
+    auth: tuple = Depends(require_api_key),
+):
+    agency, _ = auth
+    booking = _bookings.get_by_id(tracking_id)
+    if not booking or booking.metadata.get("agency") != agency:
+        raise HTTPException(status_code=404, detail="Booking not found.")
+
+    if payload.webhook_url is not None:
+        booking.notify_webhook = payload.webhook_url
+    if payload.cancellation_fee is not None:
+        booking.cancellation_fee = payload.cancellation_fee
+    if payload.cabin_class is not None:
+        booking.cabin_class = payload.cabin_class
+    if payload.passenger:
+        p = payload.passenger
+        booking.passenger = Passenger(
+            title=p.get("title", booking.passenger.title),
+            given_name=p.get("given_name", booking.passenger.given_name),
+            family_name=p.get("family_name", booking.passenger.family_name),
+            born_on=p.get("born_on", booking.passenger.born_on),
+            gender=p.get("gender", booking.passenger.gender),
+            email=p.get("email", booking.passenger.email),
+            phone=p.get("phone", booking.passenger.phone),
+        )
+    booking.metadata["updated_at"] = datetime.utcnow().isoformat() + "Z"
+    _bookings.upsert(booking)
+
+    return {"ok": True, "tracking_id": tracking_id, "updated": datetime.utcnow().isoformat() + "Z"}
+
+
+# ---------------------------------------------------------------------------
+# DELETE /bookings/{id}  — stop monitoring
+# ---------------------------------------------------------------------------
+
+@router.delete("/bookings/{tracking_id}", summary="Stop monitoring a booking")
+async def delete_booking(
+    tracking_id: str,
+    auth: tuple = Depends(require_api_key),
+):
+    agency, _ = auth
+    booking = _bookings.get_by_id(tracking_id)
+    if not booking or booking.metadata.get("agency") != agency:
+        raise HTTPException(status_code=404, detail="Booking not found.")
+    _bookings.deactivate(tracking_id)
+    return {"ok": True, "tracking_id": tracking_id, "status": "stopped"}
+
+
+# ---------------------------------------------------------------------------
+# GET /analytics  — savings + usage for this agency
+# ---------------------------------------------------------------------------
+
+@router.get("/analytics", summary="Agency savings and usage analytics")
+async def analytics(
+    auth: tuple = Depends(require_api_key),
+):
+    agency, api_key = auth
+    rows    = _bookings.get_by_agency(agency)
+    active  = [r for r in rows if r.get("_active")]
+    stopped = [r for r in rows if not r.get("_active")]
+    savings = _bookings.get_agency_savings(agency)
+    ag_obj  = _agencies.get_by_key(api_key)
+
+    return {
+        "agency":                agency,
+        "total_monitored":       len(rows),
+        "currently_monitoring":  len(active),
+        "stopped":               len(stopped),
+        "total_savings_usd":     round(savings, 2),
+        "ryde_fees_usd":         round(savings * 0.20, 2),
+        "net_savings_usd":       round(savings * 0.80, 2),
+        "total_api_calls":       ag_obj.total_calls if ag_obj else 0,
+        "last_api_call":         ag_obj.last_call_at if ag_obj else None,
+        "rate_limit":            f"{_RATE_LIMIT} requests / {_RATE_WINDOW}s",
+    }
+
+
+# ---------------------------------------------------------------------------
+# GET /account  — agency profile
+# ---------------------------------------------------------------------------
+
+@router.get("/account", summary="Agency profile and quota")
+async def account(
+    auth: tuple = Depends(require_api_key),
+):
+    agency, api_key = auth
+    ag = _agencies.get_by_key(api_key)
+    return {
+        "agency":       ag.name,
+        "email":        ag.email,
+        "environment":  ag.environment,
+        "key_prefix":   api_key[:20] + "...",
+        "member_since": ag.created_at,
+        "total_calls":  ag.total_calls,
+        "last_call":    ag.last_call_at,
+        "rate_limit":   f"{_RATE_LIMIT} req / {_RATE_WINDOW}s",
+        "endpoints": [
+            "POST   /api/v1/monitor",
+            "GET    /api/v1/bookings",
+            "GET    /api/v1/bookings/{id}",
+            "PATCH  /api/v1/bookings/{id}",
+            "DELETE /api/v1/bookings/{id}",
+            "GET    /api/v1/analytics",
+            "GET    /api/v1/account",
+        ],
+    }
