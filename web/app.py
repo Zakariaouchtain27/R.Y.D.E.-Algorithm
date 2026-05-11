@@ -1,5 +1,6 @@
 import asyncio
 import os
+import time
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -86,7 +87,6 @@ def _on_ryde_event(event: dict) -> None:
     if _loop is None or _loop.is_closed():
         return
 
-    # Write bot decision/rebooking events to the audit log
     booking_id = event.get("booking_id", "")
     event_type = event.get("type", "decision")
     if booking_id and event_type != "market":
@@ -95,7 +95,7 @@ def _on_ryde_event(event: dict) -> None:
             agency = booking.metadata.get("agency", "") if booking else ""
             _bookings.log_audit(booking_id, agency, event_type, event)
         except Exception:
-            pass  # never let audit failure block the WebSocket broadcast
+            pass
 
     asyncio.run_coroutine_threadsafe(_manager.broadcast(event), _loop)
 
@@ -104,9 +104,20 @@ def _on_ryde_event(event: dict) -> None:
 async def _startup() -> None:
     global _loop, _market_task
 
-    # Guarantee the DB directory exists before any store opens a connection
-    # (critical when RYDE_DB_PATH=/data/ryde.db and the Railway volume is mounted)
     Path(_db_path).parent.mkdir(parents=True, exist_ok=True)
+
+    # Wait for PostgreSQL to be ready (Railway starts services concurrently)
+    db_url = os.getenv("DATABASE_URL", "")
+    if db_url:
+        for attempt in range(10):
+            try:
+                with _bookings._lock:
+                    _bookings._execute("SELECT 1").fetchone()
+                break
+            except Exception:
+                if attempt == 9:
+                    raise
+                await asyncio.sleep(2 ** attempt)  # 1s, 2s, 4s, 8s ...
 
     _loop = asyncio.get_running_loop()
     ryde_events.subscribe(_on_ryde_event)
@@ -129,23 +140,20 @@ async def _shutdown() -> None:
 async def health():
     checks: dict = {}
 
-    # DB liveness
+    # DB liveness — use _execute() so it works for both SQLite and psycopg2
     try:
-        _bookings._conn.execute("SELECT 1").fetchone()
+        with _bookings._lock:
+            _bookings._execute("SELECT 1").fetchone()
         checks["db"] = "ok"
     except Exception as exc:
         checks["db"] = f"error: {exc}"
 
     # Market task
-    if _market_task and not _market_task.done():
-        checks["market"] = "ok"
-    else:
-        checks["market"] = "stopped"
+    checks["market"] = "ok" if (_market_task and not _market_task.done()) else "stopped"
 
     overall = "ok" if all(v == "ok" for v in checks.values()) else "degraded"
-    code = 200 if overall == "ok" else 503
     return JSONResponse(
-        status_code=code,
+        status_code=200 if overall == "ok" else 503,
         content={
             "status":    overall,
             "checks":    checks,
