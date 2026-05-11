@@ -1,6 +1,6 @@
 import asyncio
+import logging
 import os
-import time
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -10,6 +10,9 @@ from fastapi import FastAPI, Form, HTTPException, Request, WebSocket, WebSocketD
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
+from ryde.logging_config import setup_logging
+setup_logging(os.getenv("LOG_LEVEL", "INFO"))
+
 from ryde import events as ryde_events
 from ryde.live_market import get_market
 from ryde.models import Booking, Passenger
@@ -18,6 +21,8 @@ from .admin import router as admin_router
 from .api_v1 import router as api_v1_router
 from .client_store import ClientStore
 from .stripe_client import StripeClient
+
+log = logging.getLogger(__name__)
 
 app = FastAPI(title="RYDE")
 app.include_router(api_v1_router)
@@ -45,7 +50,7 @@ def _get_stripe() -> StripeClient:
 
 
 # ---------------------------------------------------------------------------
-# Live ticker: WebSocket fan-out
+# WebSocket fan-out
 # ---------------------------------------------------------------------------
 
 class ConnectionManager:
@@ -83,10 +88,8 @@ _market_task: Optional[asyncio.Task] = None
 
 
 def _on_ryde_event(event: dict) -> None:
-    """Called from the bot thread — bridges to the async event loop."""
     if _loop is None or _loop.is_closed():
         return
-
     booking_id = event.get("booking_id", "")
     event_type = event.get("type", "decision")
     if booking_id and event_type != "market":
@@ -96,17 +99,14 @@ def _on_ryde_event(event: dict) -> None:
             _bookings.log_audit(booking_id, agency, event_type, event)
         except Exception:
             pass
-
     asyncio.run_coroutine_threadsafe(_manager.broadcast(event), _loop)
 
 
 @app.on_event("startup")
 async def _startup() -> None:
     global _loop, _market_task
-
     Path(_db_path).parent.mkdir(parents=True, exist_ok=True)
 
-    # Wait for PostgreSQL to be ready (Railway starts services concurrently)
     db_url = os.getenv("DATABASE_URL", "")
     if db_url:
         for attempt in range(10):
@@ -114,11 +114,15 @@ async def _startup() -> None:
                 with _bookings._lock:
                     _bookings._execute("SELECT 1").fetchone()
                 break
-            except Exception:
+            except Exception as exc:
                 if attempt == 9:
+                    log.error("PostgreSQL not reachable after 10 attempts: %s", exc)
                     raise
-                await asyncio.sleep(2 ** attempt)  # 1s, 2s, 4s, 8s ...
+                wait = 2 ** attempt
+                log.warning("PostgreSQL not ready (attempt %d), retrying in %ds", attempt + 1, wait)
+                await asyncio.sleep(wait)
 
+    log.info("RYDE startup complete", extra={"db": "postgres" if db_url else "sqlite"})
     _loop = asyncio.get_running_loop()
     ryde_events.subscribe(_on_ryde_event)
     _market_task = asyncio.create_task(get_market().run(interval=_MARKET_INTERVAL))
@@ -133,32 +137,23 @@ async def _shutdown() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Health check
+# Health
 # ---------------------------------------------------------------------------
 
 @app.get("/health")
 async def health():
     checks: dict = {}
-
-    # DB liveness — use _execute() so it works for both SQLite and psycopg2
     try:
         with _bookings._lock:
             _bookings._execute("SELECT 1").fetchone()
         checks["db"] = "ok"
     except Exception as exc:
         checks["db"] = f"error: {exc}"
-
-    # Market task
     checks["market"] = "ok" if (_market_task and not _market_task.done()) else "stopped"
-
     overall = "ok" if all(v == "ok" for v in checks.values()) else "degraded"
     return JSONResponse(
         status_code=200 if overall == "ok" else 503,
-        content={
-            "status":    overall,
-            "checks":    checks,
-            "timestamp": datetime.utcnow().isoformat() + "Z",
-        },
+        content={"status": overall, "checks": checks, "timestamp": datetime.utcnow().isoformat() + "Z"},
     )
 
 
@@ -177,19 +172,23 @@ async def ws_ticker(ws: WebSocket):
         await _manager.disconnect(ws)
 
 
-@app.get("/terminal", response_class=HTMLResponse)
-async def terminal(request: Request):
-    return templates.TemplateResponse(request, "terminal.html")
-
-
 # ---------------------------------------------------------------------------
-# Routes
+# Pages
 # ---------------------------------------------------------------------------
 
 @app.get("/", response_class=HTMLResponse)
 async def landing(request: Request):
     return templates.TemplateResponse(request, "index.html")
 
+@app.get("/terminal", response_class=HTMLResponse)
+async def terminal(request: Request):
+    return templates.TemplateResponse(request, "terminal.html")
+
+@app.get("/api", response_class=HTMLResponse)
+async def api_docs(request: Request):
+    return templates.TemplateResponse(request, "api_docs.html", {
+        "base_url": os.getenv("BASE_URL", "https://your-app.railway.app"),
+    })
 
 @app.get("/register", response_class=HTMLResponse)
 async def register_form(request: Request):
@@ -211,9 +210,7 @@ async def register_submit(
     client_id = str(uuid.uuid4())
     customer = _get_stripe().create_customer(email=email, name=name)
     _clients.create_client(
-        client_id=client_id,
-        name=name,
-        email=email,
+        client_id=client_id, name=name, email=email,
         stripe_customer_id=customer.id,
         booking_data={
             "origin": origin.upper().strip(),
@@ -257,19 +254,14 @@ async def confirm_setup(client_id: str, payment_method_id: str = Form(...)):
             title="mr",
             given_name=name_parts[0],
             family_name=name_parts[-1] if len(name_parts) > 1 else name_parts[0],
-            born_on="1990-01-01",
-            gender="m",
-            email=client["email"],
-            phone="+10000000000",
+            born_on="1990-01-01", gender="m",
+            email=client["email"], phone="+10000000000",
         ),
-        origin=bd["origin"],
-        destination=bd["destination"],
+        origin=bd["origin"], destination=bd["destination"],
         departure_date=datetime.strptime(bd["departure_date"], "%Y-%m-%d"),
-        original_price=float(bd["original_price"]),
-        currency="USD",
+        original_price=float(bd["original_price"]), currency="USD",
         cancellation_fee=float(bd["cancellation_fee"]),
-        adapter="duffel",
-        adapter_booking_ref=bd["booking_ref"],
+        adapter="duffel", adapter_booking_ref=bd["booking_ref"],
         notify_webhook=f"{_BASE_URL}/webhook/ryde",
     )
     _bookings.upsert(booking)
@@ -312,7 +304,7 @@ async def ryde_webhook(request: Request):
                 )
                 _clients.add_savings(booking_id, savings)
             except Exception as exc:
-                print(f"[ryde.webhook] Stripe charge failed: {exc}")
+                log.error("Stripe charge failed", extra={"booking_id": booking_id, "error": str(exc)})
     if booking_id:
         _clients.log_event(booking_id, event, payload)
     return {"ok": True}

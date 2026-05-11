@@ -1,0 +1,400 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RYDE API — Developer Reference</title>
+<style>
+  :root {
+    --bg: #0a0a0f;
+    --surface: #12121a;
+    --border: #1e1e2e;
+    --accent: #7c6af7;
+    --accent2: #06d6a0;
+    --danger: #ef4444;
+    --warn: #f59e0b;
+    --text: #e2e8f0;
+    --muted: #64748b;
+    --code-bg: #0d1117;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; line-height: 1.6; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+
+  /* Layout */
+  .layout { display: flex; min-height: 100vh; }
+  nav {
+    width: 260px; flex-shrink: 0; background: var(--surface);
+    border-right: 1px solid var(--border); padding: 2rem 1.5rem;
+    position: sticky; top: 0; height: 100vh; overflow-y: auto;
+  }
+  main { flex: 1; max-width: 860px; padding: 3rem 2.5rem; }
+
+  /* Nav */
+  .nav-logo { font-size: 1.4rem; font-weight: 700; color: var(--accent); margin-bottom: 2rem; display: block; }
+  .nav-section { font-size: 0.7rem; text-transform: uppercase; letter-spacing: .1em; color: var(--muted); margin: 1.5rem 0 .5rem; }
+  nav ul { list-style: none; }
+  nav ul li a { display: block; padding: .3rem 0; font-size: .9rem; color: var(--muted); transition: color .15s; }
+  nav ul li a:hover { color: var(--text); text-decoration: none; }
+
+  /* Typography */
+  h1 { font-size: 2rem; font-weight: 700; margin-bottom: .5rem; }
+  h2 { font-size: 1.3rem; font-weight: 600; margin: 3rem 0 1rem; padding-bottom: .5rem; border-bottom: 1px solid var(--border); }
+  h3 { font-size: 1rem; font-weight: 600; margin: 2rem 0 .75rem; }
+  p { margin-bottom: 1rem; color: #94a3b8; }
+  .lead { font-size: 1.1rem; color: var(--text); margin-bottom: 2rem; }
+
+  /* Method badges */
+  .method { display: inline-block; padding: .2rem .5rem; border-radius: 4px; font-size: .75rem; font-weight: 700; font-family: monospace; margin-right: .5rem; }
+  .get  { background: #0e3a5c; color: #38bdf8; }
+  .post { background: #0c3a2a; color: var(--accent2); }
+  .patch  { background: #3a2a0c; color: #fbbf24; }
+  .delete { background: #3a0c0c; color: #f87171; }
+
+  /* Code blocks */
+  pre {
+    background: var(--code-bg); border: 1px solid var(--border);
+    border-radius: 8px; padding: 1.25rem 1.5rem; overflow-x: auto;
+    font-size: .85rem; line-height: 1.7; margin: 1rem 0;
+  }
+  code { font-family: 'SF Mono', 'Fira Code', monospace; }
+  p code, li code {
+    background: var(--code-bg); border: 1px solid var(--border);
+    padding: .1rem .4rem; border-radius: 4px; font-size: .85em;
+  }
+
+  /* Endpoint card */
+  .endpoint {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 10px; padding: 1.5rem; margin-bottom: 1.5rem;
+  }
+  .endpoint-title { display: flex; align-items: center; margin-bottom: .75rem; }
+  .endpoint-path { font-family: monospace; font-size: .95rem; }
+  .endpoint-desc { color: #94a3b8; font-size: .9rem; margin-bottom: 1rem; }
+
+  /* Table */
+  table { width: 100%; border-collapse: collapse; margin: 1rem 0; font-size: .9rem; }
+  th { text-align: left; padding: .6rem 1rem; background: var(--surface); color: var(--muted); font-size: .75rem; text-transform: uppercase; letter-spacing: .05em; border-bottom: 1px solid var(--border); }
+  td { padding: .7rem 1rem; border-bottom: 1px solid var(--border); vertical-align: top; }
+  td:first-child { font-family: monospace; color: var(--accent2); font-size: .85rem; }
+  tr:last-child td { border-bottom: none; }
+
+  /* Alert boxes */
+  .alert { border-radius: 8px; padding: 1rem 1.25rem; margin: 1.25rem 0; font-size: .9rem; border-left: 4px solid; }
+  .alert-info  { background: #0e1a3a; border-color: var(--accent); color: #93c5fd; }
+  .alert-warn  { background: #2a1a00; border-color: var(--warn);   color: #fcd34d; }
+  .alert-ok    { background: #042a1a; border-color: var(--accent2); color: #6ee7b7; }
+
+  /* Hero */
+  .hero { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 2rem; margin-bottom: 3rem; }
+  .hero h1 { background: linear-gradient(135deg, var(--accent), var(--accent2)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; }
+  .badge { display: inline-block; background: #1e1e2e; border: 1px solid var(--border); border-radius: 999px; padding: .2rem .75rem; font-size: .75rem; color: var(--muted); margin: .25rem .25rem 0 0; }
+  .badge.green { border-color: var(--accent2); color: var(--accent2); }
+
+  @media (max-width: 768px) {
+    nav { display: none; }
+    main { padding: 1.5rem; }
+  }
+</style>
+</head>
+<body>
+<div class="layout">
+
+<!-- Sidebar -->
+<nav>
+  <a href="/api" class="nav-logo">RYDE API</a>
+  <div class="nav-section">Getting Started</div>
+  <ul>
+    <li><a href="#quickstart">Quick Start</a></li>
+    <li><a href="#auth">Authentication</a></li>
+    <li><a href="#errors">Errors &amp; Rate Limits</a></li>
+  </ul>
+  <div class="nav-section">Endpoints</div>
+  <ul>
+    <li><a href="#monitor">Submit Booking</a></li>
+    <li><a href="#list">List Bookings</a></li>
+    <li><a href="#get">Get Booking</a></li>
+    <li><a href="#audit">Audit Trail</a></li>
+    <li><a href="#patch">Update Booking</a></li>
+    <li><a href="#delete">Stop Monitoring</a></li>
+    <li><a href="#analytics">Analytics</a></li>
+    <li><a href="#account">Account</a></li>
+  </ul>
+  <div class="nav-section">Webhooks</div>
+  <ul>
+    <li><a href="#webhook-events">Events</a></li>
+    <li><a href="#webhook-verify">Verification</a></li>
+  </ul>
+</nav>
+
+<!-- Main content -->
+<main>
+
+  <!-- Hero -->
+  <div class="hero">
+    <h1>RYDE Developer API</h1>
+    <p class="lead">Submit your clients’ bookings. PRISM monitors prices 24/7 and automatically rebookings when savings exceed your cancellation fee.</p>
+    <span class="badge green">REST</span>
+    <span class="badge green">JSON</span>
+    <span class="badge">HMAC Webhooks</span>
+    <span class="badge">60 req/min</span>
+  </div>
+
+  <!-- Base URL -->
+  <h2 id="quickstart">Quick Start</h2>
+  <p>Base URL for all requests:</p>
+  <pre><code>{{ base_url }}/api/v1</code></pre>
+
+  <p>Every request needs your agency API key in the header:</p>
+  <pre><code>X-API-Key: ryde_live_yourslug_a3f9c2d1...</code></pre>
+
+  <p>Submit a booking in one call:</p>
+  <pre><code>curl -X POST {{ base_url }}/api/v1/monitor \
+  -H "X-API-Key: YOUR_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "origin": "JFK",
+    "destination": "CDG",
+    "departure_date": "2026-09-15",
+    "original_price": 850.00,
+    "cancellation_fee": 75.00,
+    "fare_type": "refundable",
+    "cabin_class": "economy",
+    "webhook_url": "https://yourapp.com/webhooks/ryde"
+  }'</code></pre>
+
+  <div class="alert alert-ok">
+    RYDE charges a <strong>20% success fee</strong> on realized savings only. No saving = no charge.
+  </div>
+
+  <!-- Auth -->
+  <h2 id="auth">Authentication</h2>
+  <p>Pass your API key in the <code>X-API-Key</code> header on every request. Keys look like:</p>
+  <pre><code>ryde_live_acmetravel_a3f9c2d1b4e8f7c2d9a1b3e5f8c4d2a7</code></pre>
+  <p>Contact <a href="mailto:api@ryde.io">api@ryde.io</a> to get your key. Keep it secret — it grants full access to your agency’s bookings.</p>
+
+  <!-- Errors -->
+  <h2 id="errors">Errors &amp; Rate Limits</h2>
+  <table>
+    <tr><th>Status</th><th>Meaning</th></tr>
+    <tr><td>200 / 201</td><td>Success</td></tr>
+    <tr><td>401</td><td>Missing <code>X-API-Key</code> header</td></tr>
+    <tr><td>403</td><td>Invalid or revoked API key</td></tr>
+    <tr><td>404</td><td>Booking not found (or belongs to another agency)</td></tr>
+    <tr><td>422</td><td>Validation error — check the <code>detail</code> field</td></tr>
+    <tr><td>429</td><td>Rate limit exceeded — retry after 60 seconds</td></tr>
+    <tr><td>500</td><td>Server error — contact support</td></tr>
+  </table>
+  <p>Rate limit: <strong>60 requests per 60 seconds</strong> per API key. The <code>429</code> response includes a <code>Retry-After: 60</code> header.</p>
+
+  <div class="alert alert-warn">
+    <strong>Non-refundable fares are rejected.</strong> Only submit <code>refundable</code> or <code>partially_refundable</code> fares. Submitting a fare where <code>cancellation_fee &ge; original_price</code> also returns 422.
+  </div>
+
+  <!-- ── ENDPOINTS ── -->
+  <h2>Endpoints</h2>
+
+  <!-- POST /monitor -->
+  <div class="endpoint" id="monitor">
+    <div class="endpoint-title">
+      <span class="method post">POST</span>
+      <span class="endpoint-path">/api/v1/monitor</span>
+    </div>
+    <div class="endpoint-desc">Submit a booking for PRISM monitoring. Returns a <code>tracking_id</code> you use for all subsequent calls.</div>
+
+    <h3>Request body</h3>
+    <table>
+      <tr><th>Field</th><th>Type</th><th>Required</th><th>Description</th></tr>
+      <tr><td>origin</td><td>string</td><td>yes</td><td>IATA code, e.g. <code>JFK</code></td></tr>
+      <tr><td>destination</td><td>string</td><td>yes</td><td>IATA code, e.g. <code>CDG</code></td></tr>
+      <tr><td>departure_date</td><td>string</td><td>yes</td><td>Future date in <code>YYYY-MM-DD</code></td></tr>
+      <tr><td>original_price</td><td>number</td><td>yes</td><td>Price paid in USD (must be &gt; 0)</td></tr>
+      <tr><td>cancellation_fee</td><td>number</td><td>yes</td><td>Airline fee to cancel and rebook (&ge; 0, &lt; original_price)</td></tr>
+      <tr><td>fare_type</td><td>string</td><td>yes</td><td><code>refundable</code> or <code>partially_refundable</code></td></tr>
+      <tr><td>cabin_class</td><td>string</td><td>no</td><td><code>economy</code> (default) | <code>premium_economy</code> | <code>business</code> | <code>first</code></td></tr>
+      <tr><td>webhook_url</td><td>string</td><td>no</td><td>HTTPS URL to receive decision events</td></tr>
+      <tr><td>reference</td><td>string</td><td>no</td><td>Your internal booking reference</td></tr>
+    </table>
+
+    <h3>Idempotency</h3>
+    <p>Pass <code>Idempotency-Key: &lt;uuid&gt;</code> to safely retry on network errors. The same key always returns the same <code>tracking_id</code>.</p>
+
+    <h3>Response <code>201</code></h3>
+    <pre><code>{
+  "tracking_id": "b2b_3a9f2c1d4e8b7a05",
+  "status": "monitoring",
+  "agency": "ACME Travel",
+  "route": "JFK-CDG",
+  "fare_type": "refundable",
+  "departure_date": "2026-09-15",
+  "webhook_url": "https://yourapp.com/webhooks/ryde",
+  "submitted_at": "2026-05-11T10:30:00Z"
+}</code></pre>
+  </div>
+
+  <!-- GET /bookings -->
+  <div class="endpoint" id="list">
+    <div class="endpoint-title"><span class="method get">GET</span><span class="endpoint-path">/api/v1/bookings</span></div>
+    <div class="endpoint-desc">List all bookings for your agency. Optional query param: <code>?status_filter=monitoring</code> or <code>stopped</code>.</div>
+    <pre><code>curl {{ base_url }}/api/v1/bookings \
+  -H "X-API-Key: YOUR_KEY"</code></pre>
+  </div>
+
+  <!-- GET /bookings/{id} -->
+  <div class="endpoint" id="get">
+    <div class="endpoint-title"><span class="method get">GET</span><span class="endpoint-path">/api/v1/bookings/{tracking_id}</span></div>
+    <div class="endpoint-desc">Get the current status and details of a single booking.</div>
+    <pre><code>curl {{ base_url }}/api/v1/bookings/b2b_3a9f2c1d4e8b7a05 \
+  -H "X-API-Key: YOUR_KEY"</code></pre>
+  </div>
+
+  <!-- GET /bookings/{id}/audit -->
+  <div class="endpoint" id="audit">
+    <div class="endpoint-title"><span class="method get">GET</span><span class="endpoint-path">/api/v1/bookings/{tracking_id}/audit</span></div>
+    <div class="endpoint-desc">Returns the full immutable audit trail — every PRISM decision, price observed, rebooking attempt, and lifecycle event in order.</div>
+    <pre><code>{
+  "tracking_id": "b2b_3a9f2c1d4e8b7a05",
+  "count": 4,
+  "trail": [
+    {"seq": 1, "event": "submitted",  "timestamp": "2026-05-11T10:30:00Z", "detail": {...}},
+    {"seq": 2, "event": "decision",   "timestamp": "2026-05-11T11:00:00Z", "detail": {"action": "WAIT", ...}},
+    {"seq": 3, "event": "decision",   "timestamp": "2026-05-11T14:00:00Z", "detail": {"action": "STRIKE", ...}},
+    {"seq": 4, "event": "rebooked",   "timestamp": "2026-05-11T14:01:00Z", "detail": {"savings_realized": 142.50}}
+  ]
+}</code></pre>
+  </div>
+
+  <!-- PATCH /bookings/{id} -->
+  <div class="endpoint" id="patch">
+    <div class="endpoint-title"><span class="method patch">PATCH</span><span class="endpoint-path">/api/v1/bookings/{tracking_id}</span></div>
+    <div class="endpoint-desc">Update webhook URL, cancellation fee, cabin class, or passenger details. All fields optional.</div>
+    <pre><code>curl -X PATCH {{ base_url }}/api/v1/bookings/b2b_3a9f2c1d4e8b7a05 \
+  -H "X-API-Key: YOUR_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "webhook_url": "https://yourapp.com/webhooks/ryde-v2",
+    "passenger": {
+      "given_name": "Jane", "family_name": "Smith",
+      "email": "jane@example.com", "phone": "+12125550100",
+      "born_on": "1985-03-22", "gender": "f", "title": "ms"
+    }
+  }'</code></pre>
+  </div>
+
+  <!-- DELETE /bookings/{id} -->
+  <div class="endpoint" id="delete">
+    <div class="endpoint-title"><span class="method delete">DELETE</span><span class="endpoint-path">/api/v1/bookings/{tracking_id}</span></div>
+    <div class="endpoint-desc">Stop monitoring a booking. The booking record and its audit trail are preserved.</div>
+    <pre><code>curl -X DELETE {{ base_url }}/api/v1/bookings/b2b_3a9f2c1d4e8b7a05 \
+  -H "X-API-Key: YOUR_KEY"</code></pre>
+  </div>
+
+  <!-- GET /analytics -->
+  <div class="endpoint" id="analytics">
+    <div class="endpoint-title"><span class="method get">GET</span><span class="endpoint-path">/api/v1/analytics</span></div>
+    <div class="endpoint-desc">Agency-level savings, RYDE fees, and API usage statistics.</div>
+    <pre><code>{
+  "agency": "ACME Travel",
+  "total_monitored": 48,
+  "currently_monitoring": 31,
+  "total_savings_usd": 6240.50,
+  "ryde_fees_usd": 1248.10,
+  "net_savings_usd": 4992.40,
+  "total_api_calls": 1204
+}</code></pre>
+  </div>
+
+  <!-- GET /account -->
+  <div class="endpoint" id="account">
+    <div class="endpoint-title"><span class="method get">GET</span><span class="endpoint-path">/api/v1/account</span></div>
+    <div class="endpoint-desc">Your agency profile, key prefix, environment, and quota info.</div>
+    <pre><code>curl {{ base_url }}/api/v1/account \
+  -H "X-API-Key: YOUR_KEY"</code></pre>
+  </div>
+
+  <!-- Webhooks -->
+  <h2 id="webhook-events">Webhook Events</h2>
+  <p>When you provide a <code>webhook_url</code>, RYDE POSTs a signed JSON payload whenever PRISM makes a decision or executes a rebooking.</p>
+
+  <h3>ryde.decision</h3>
+  <pre><code>{
+  "event": "ryde.decision",
+  "booking_id": "b2b_3a9f2c1d4e8b7a05",
+  "action": "WAIT",
+  "confidence_score": 67.4,
+  "net_savings": 180.00,
+  "probability_of_future_drop": 0.73,
+  "seat_urgency_multiplier": 1.1,
+  "reasoning": "Price likely to drop further. Holding."
+}</code></pre>
+
+  <p>Possible <code>action</code> values:</p>
+  <table>
+    <tr><th>Action</th><th>Meaning</th></tr>
+    <tr><td>WAIT</td><td>Monitoring, no action taken</td></tr>
+    <tr><td>STRIKE</td><td>Rebooking is being executed now</td></tr>
+    <tr><td>PHANTOM_HOLD</td><td>Price locked, evaluating</td></tr>
+    <tr><td>IGNORE</td><td>Saving not worth the fee</td></tr>
+  </table>
+
+  <h3>ryde.rebooking</h3>
+  <pre><code>{
+  "event": "ryde.rebooking",
+  "booking_id": "b2b_3a9f2c1d4e8b7a05",
+  "success": true,
+  "old_ref": "ABC123",
+  "new_ref": "XYZ789",
+  "savings_realized": 142.50,
+  "error": null,
+  "timestamp": "2026-05-11T14:01:00"
+}</code></pre>
+
+  <!-- Webhook verification -->
+  <h2 id="webhook-verify">Webhook Signature Verification</h2>
+  <p>Every webhook includes an <code>X-RYDE-Signature</code> header. Always verify it to reject spoofed requests.</p>
+
+  <h3>Python</h3>
+  <pre><code>import hashlib, hmac
+
+def verify_ryde_webhook(body: bytes, header: str, secret: str) -> bool:
+    expected = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(header, f"sha256={expected}")
+
+# FastAPI / Starlette example
+@app.post("/webhooks/ryde")
+async def handle(request: Request):
+    body = await request.body()
+    sig  = request.headers.get("X-RYDE-Signature", "")
+    if not verify_ryde_webhook(body, sig, RYDE_WEBHOOK_SECRET):
+        raise HTTPException(status_code=401, detail="Invalid signature")
+    payload = json.loads(body)
+    ...</code></pre>
+
+  <h3>Node.js</h3>
+  <pre><code>const crypto = require('crypto');
+
+function verifyRydeWebhook(body, header, secret) {
+  const expected = 'sha256=' + crypto
+    .createHmac('sha256', secret)
+    .update(body)
+    .digest('hex');
+  return crypto.timingSafeEqual(
+    Buffer.from(header), Buffer.from(expected)
+  );
+}</code></pre>
+
+  <div class="alert alert-info">
+    Use <code>hmac.compare_digest</code> / <code>timingSafeEqual</code> — not <code>==</code>. Constant-time comparison prevents timing attacks.
+  </div>
+
+  <br><br>
+  <p style="color: var(--muted); font-size: .85rem;">
+    Questions? Email <a href="mailto:api@ryde.io">api@ryde.io</a> &nbsp;&middot;&nbsp;
+    Interactive playground: <a href="/docs">/docs</a>
+  </p>
+
+</main>
+</div>
+</body>
+</html>
