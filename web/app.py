@@ -41,7 +41,9 @@ _stripe: Optional[StripeClient] = None
 _SUCCESS_FEE     = float(os.getenv("SUCCESS_FEE_PERCENT", "20")) / 100
 _BASE_URL        = os.getenv("BASE_URL", "http://localhost:8000")
 _MARKET_INTERVAL = float(os.getenv("MARKET_TICK_SECONDS", "3"))
-_SCAN_INTERVAL   = int(os.getenv("PRISM_SCAN_INTERVAL_SECONDS", "3600"))  # default: 1 hour
+# Background scan runs every 15 min; per-booking cadence is controlled
+# inside scan_all_active() based on days_to_departure.
+_SCAN_INTERVAL = int(os.getenv("PRISM_SCAN_INTERVAL_SECONDS", "900"))  # 15 min
 
 
 def _get_stripe() -> StripeClient:
@@ -110,18 +112,21 @@ def _on_ryde_event(event: dict) -> None:
 
 async def _prism_background_scan() -> None:
     """
-    Runs every PRISM_SCAN_INTERVAL_SECONDS (default 1 hour).
-    Re-evaluates all active B2B bookings using their stored current_price
-    so agencies receive decisions even if they don't push price updates.
+    Runs every PRISM_SCAN_INTERVAL_SECONDS (default 15 min).
+    The actual per-booking cadence is controlled inside scan_all_active()
+    based on days_to_departure:
+      >= 14 days  →  every 60 min
+       7–14 days  →  every 30 min
+        < 7 days  →  every 15 min
     """
-    # First run after 60s — let the app fully start first
-    await asyncio.sleep(60)
+    await asyncio.sleep(60)  # let the app fully start before first scan
     while True:
         try:
             count = await scan_all_active()
-            log.info("Hourly PRISM scan complete: %d booking(s) evaluated", count)
+            if count:
+                log.info("PRISM background scan: %d booking(s) evaluated", count)
         except Exception as exc:
-            log.error("Hourly PRISM scan failed: %s", exc)
+            log.error("PRISM background scan failed: %s", exc)
         await asyncio.sleep(_SCAN_INTERVAL)
 
 
@@ -146,7 +151,7 @@ async def _startup() -> None:
                 await asyncio.sleep(wait)
 
     log.info("RYDE startup complete", extra={"db": "postgres" if db_url else "sqlite"})
-    _loop = asyncio.get_running_loop()
+    _loop        = asyncio.get_running_loop()
     ryde_events.subscribe(_on_ryde_event)
     _market_task = asyncio.create_task(get_market().run(interval=_MARKET_INTERVAL))
     _scan_task   = asyncio.create_task(_prism_background_scan())
@@ -175,8 +180,8 @@ async def health():
         checks["db"] = "ok"
     except Exception as exc:
         checks["db"] = f"error: {exc}"
-    checks["market"] = "ok" if (_market_task and not _market_task.done()) else "stopped"
-    checks["prism_scan"] = "ok" if (_scan_task and not _scan_task.done()) else "stopped"
+    checks["market"]     = "ok" if (_market_task and not _market_task.done()) else "stopped"
+    checks["prism_scan"] = "ok" if (_scan_task   and not _scan_task.done())   else "stopped"
     overall = "ok" if all(v == "ok" for v in checks.values()) else "degraded"
     return JSONResponse(
         status_code=200 if overall == "ok" else 503,

@@ -11,13 +11,26 @@ current_price is provided:
   POST /monitor           — include current_price to evaluate on submit
   PATCH /bookings/{id}    — push a new current_price to re-evaluate
 
-The engine runs 5,000 Monte Carlo price paths in a thread pool and fires
-a webhook to webhook_url if the decision is STRIKE or PHANTOM_HOLD.
-WAIT/IGNORE decisions are silent — no webhook, no action needed.
+Duplicate-webhook protection
+-----------------------------
+Each PRISM run records last_evaluated_price + last_evaluated_at in the
+booking metadata. A subsequent PATCH with the same price is silently
+skipped unless at least 5 minutes have passed (price unchanged but time
+decay could shift the decision). Different price always re-evaluates.
 
-A background scheduler in app.py re-evaluates all active bookings hourly
-using each booking's last stored current_price, so even agencies that
-don't push updates will eventually receive decisions.
+Webhook security
+-----------------
+Every webhook POST is signed:
+  X-RYDE-Signature: sha256=<hmac-sha256-hex>
+Verify with: hmac.new(RYDE_WEBHOOK_SECRET, body, sha256).hexdigest()
+
+Time-decay scan frequency
+--------------------------
+Background scheduler runs every 15 minutes.
+Per booking, re-evaluation frequency scales with urgency:
+  >= 14 days to departure  →  re-evaluate every 60 minutes
+   7–14 days to departure  →  re-evaluate every 30 minutes
+    < 7 days to departure  →  re-evaluate every 15 minutes
 
 Idempotency
 -----------
@@ -42,7 +55,7 @@ import time
 import uuid
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Literal, Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException, status
@@ -63,6 +76,21 @@ _agencies = AgencyStore(_db_path)
 _engine   = PRISMEngine(_db_path)
 _notifier = Notifier()
 _executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="prism")
+
+# Seconds between re-evaluations per booking based on days to departure.
+# Background scan runs every 15 min; this controls per-booking cadence.
+_EVAL_INTERVAL = {"far": 3600, "close": 1800, "urgent": 900}
+_PATCH_COOLDOWN = 300   # seconds: skip PATCH-triggered eval at same price
+
+
+def _scan_interval(days: int) -> int:
+    """How often (seconds) PRISM should re-evaluate a booking."""
+    if days >= 14:
+        return _EVAL_INTERVAL["far"]     # 60 min
+    if days >= 7:
+        return _EVAL_INTERVAL["close"]   # 30 min
+    return _EVAL_INTERVAL["urgent"]      # 15 min
+
 
 # ---------------------------------------------------------------------------
 # Rate limiting  (60 requests / 60 seconds per key, in-memory)
@@ -112,18 +140,36 @@ async def require_api_key(
 
 
 # ---------------------------------------------------------------------------
-# PRISM evaluation (runs in thread pool — CPU-bound Monte Carlo)
+# PRISM evaluation
 # ---------------------------------------------------------------------------
 
+def _seconds_since(iso_str: str) -> float:
+    """Seconds elapsed since an ISO-8601 UTC timestamp string."""
+    try:
+        ts = datetime.fromisoformat(iso_str.rstrip("Z")).replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - ts).total_seconds()
+    except Exception:
+        return float("inf")
+
+
 def _run_prism_sync(
-    booking: Booking,
+    booking_id: str,
     current_price: float,
     seats_remaining: int,
     agency: str,
 ) -> str:
-    """Runs 5,000 Monte Carlo paths. Always called via run_in_executor."""
+    """
+    CPU-bound: runs 5,000 Monte Carlo paths. Always called via run_in_executor.
+    Re-fetches the booking from DB for freshest data, then writes back
+    last_evaluated_price / last_evaluated_at to prevent duplicate webhooks.
+    """
+    booking = _bookings.get_by_id(booking_id)
+    if not booking:
+        log.error("PRISM: booking %s not found", booking_id)
+        return "error"
+
     snapshot = PriceSnapshot(
-        booking_id=booking.booking_id,
+        booking_id=booking_id,
         current_price=current_price,
         seats_remaining=seats_remaining,
         snapshot_time=datetime.utcnow(),
@@ -133,23 +179,31 @@ def _run_prism_sync(
     try:
         decision = _engine.evaluate(booking, snapshot)
     except Exception as exc:
-        log.error("PRISM evaluation failed [%s]: %s", booking.booking_id, exc)
+        log.error("PRISM evaluation failed [%s]: %s", booking_id, exc)
         return "error"
 
     log.info(
         "PRISM [%s] → %s (score=%.1f, net_savings=$%.2f)",
-        booking.booking_id, decision.action.value,
+        booking_id, decision.action.value,
         decision.confidence_score, decision.net_savings,
     )
 
-    _bookings.log_audit(booking.booking_id, agency, "decision", {
+    now_iso = datetime.utcnow().isoformat() + "Z"
+
+    _bookings.log_audit(booking_id, agency, "decision", {
         "action":           decision.action.value,
         "confidence_score": decision.confidence_score,
         "net_savings":      round(decision.net_savings, 2),
         "current_price":    current_price,
         "seats_remaining":  seats_remaining,
         "reasoning":        decision.reasoning,
+        "evaluated_at":     now_iso,
     })
+
+    # Record evaluation so duplicates are suppressed
+    booking.metadata["last_evaluated_price"] = current_price
+    booking.metadata["last_evaluated_at"]    = now_iso
+    _bookings.upsert(booking)
 
     # Fire webhook only when agency needs to act
     if decision.action in (RYDEAction.STRIKE, RYDEAction.PHANTOM_HOLD):
@@ -159,7 +213,7 @@ def _run_prism_sync(
 
 
 async def _trigger_prism(
-    booking: Booking,
+    booking_id: str,
     current_price: float,
     seats_remaining: int,
     agency: str,
@@ -169,37 +223,52 @@ async def _trigger_prism(
     await loop.run_in_executor(
         _executor,
         _run_prism_sync,
-        booking, current_price, seats_remaining, agency,
+        booking_id, current_price, seats_remaining, agency,
     )
 
 
 async def scan_all_active() -> int:
     """
-    Re-evaluate every active B2B booking using its stored current_price.
-    Called by the hourly background task in app.py.
-    Returns number of bookings evaluated.
+    Re-evaluate active B2B bookings using stored current_price.
+    Called by the 15-minute background task in app.py.
+
+    Each booking is evaluated at a frequency determined by its days to
+    departure (60 min / 30 min / 15 min). Bookings evaluated too recently
+    are skipped to avoid duplicate decision webhooks.
+
+    Returns number of bookings evaluated this pass.
     """
     rows = _bookings.get_active()
     b2b  = [b for b in rows if b.metadata.get("source") == "b2b_api_v1"]
     if not b2b:
-        log.debug("Background scan: no active B2B bookings.")
         return 0
 
-    log.info("Background PRISM scan: %d active booking(s)", len(b2b))
+    log.info("PRISM scan: %d active B2B booking(s) to check", len(b2b))
     count = 0
+    now   = datetime.utcnow()
+
     for booking in b2b:
         current_price = float(booking.metadata.get("current_price") or 0)
         if current_price <= 0:
             continue  # agency hasn't provided a price yet
+
+        days   = max(0, (booking.departure_date.replace(tzinfo=None) - now).days)
+        needed = _scan_interval(days)  # how often we should re-evaluate this booking
+
+        last_eval = booking.metadata.get("last_evaluated_at", "")
+        if last_eval and _seconds_since(last_eval) < needed:
+            continue  # not due yet
+
         seats  = int(booking.metadata.get("seats_remaining") or 9)
         agency = booking.metadata.get("agency", "unknown")
         try:
-            await _trigger_prism(booking, current_price, seats, agency)
+            await _trigger_prism(booking.booking_id, current_price, seats, agency)
             count += 1
         except Exception as exc:
             log.error("Scan failed [%s]: %s", booking.booking_id, exc)
 
-    log.info("Background PRISM scan complete: %d evaluated", count)
+    if count:
+        log.info("PRISM scan complete: %d evaluated", count)
     return count
 
 
@@ -224,6 +293,7 @@ def _booking_to_response(d: dict) -> dict:
         "status":           "monitoring" if d.get("_active", True) else "stopped",
         "webhook_url":      d.get("notify_webhook"),
         "passenger_set":    d["passenger"]["given_name"] != "Pending",
+        "last_decision":    meta.get("last_evaluated_at"),
         "submitted_at":     d.get("_created_at"),
         "updated_at":       d.get("_updated_at"),
         "metadata":         meta,
@@ -235,23 +305,20 @@ def _booking_to_response(d: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 class MonitorRequest(BaseModel):
-    origin:           str   = Field(..., min_length=3, max_length=3, description="IATA origin code, e.g. JFK")
-    destination:      str   = Field(..., min_length=3, max_length=3, description="IATA destination code, e.g. CDG")
+    origin:           str   = Field(..., min_length=3, max_length=3)
+    destination:      str   = Field(..., min_length=3, max_length=3)
     departure_date:   str   = Field(..., description="YYYY-MM-DD")
-    original_price:   float = Field(..., gt=0, description="Price paid at booking time (USD)")
-    cancellation_fee: float = Field(..., ge=0, description="Airline cancellation/rebooking fee (USD)")
+    original_price:   float = Field(..., gt=0)
+    cancellation_fee: float = Field(..., ge=0)
     current_price:    Optional[float] = Field(
         None, gt=0,
-        description="Current market price (USD). If lower than original_price minus cancellation_fee, PRISM evaluates immediately and fires a webhook if it's time to rebook.",
+        description="Current market price. If net_savings > 0, PRISM evaluates immediately.",
     )
-    seats_remaining:  int   = Field(9, ge=0, description="Seats available at current_price. Lower counts increase PRISM urgency score.")
+    seats_remaining:  int   = Field(9, ge=0)
     cabin_class:      Literal["economy", "premium_economy", "business", "first"] = "economy"
-    fare_type:        Literal["refundable", "partially_refundable"] = Field(
-        "refundable",
-        description="Non-refundable fares are rejected at submission time.",
-    )
-    webhook_url:  Optional[str] = Field(None, description="HTTPS endpoint that receives PRISM decision events")
-    reference:    Optional[str] = Field(None, description="Your internal PNR or booking reference")
+    fare_type:        Literal["refundable", "partially_refundable"] = "refundable"
+    webhook_url:  Optional[str] = None
+    reference:    Optional[str] = None
 
     @field_validator("origin", "destination")
     @classmethod
@@ -274,13 +341,12 @@ class MonitorRequest(BaseModel):
         if self.cancellation_fee >= self.original_price:
             raise ValueError(
                 f"cancellation_fee ({self.cancellation_fee}) must be less than "
-                f"original_price ({self.original_price}). "
-                "Rebooking would never produce a saving."
+                f"original_price ({self.original_price})."
             )
         return self
 
 
-@router.post("/monitor", status_code=201, summary="Submit booking for PRISM monitoring")
+@router.post("/monitor", status_code=201)
 async def submit_monitor(
     payload: MonitorRequest,
     auth: tuple = Depends(require_api_key),
@@ -294,7 +360,7 @@ async def submit_monitor(
             return cached["response"]
 
     tracking_id = f"b2b_{uuid.uuid4().hex[:16]}"
-    now_iso = datetime.utcnow().isoformat() + "Z"
+    now_iso     = datetime.utcnow().isoformat() + "Z"
 
     meta: dict = {
         "source":          "b2b_api_v1",
@@ -333,20 +399,17 @@ async def submit_monitor(
         "original_price":   payload.original_price,
         "current_price":    payload.current_price,
         "cancellation_fee": payload.cancellation_fee,
-        "cabin_class":      payload.cabin_class,
         "fare_type":        payload.fare_type,
         "departure_date":   payload.departure_date,
         "webhook_url":      payload.webhook_url,
-        "reference":        payload.reference,
     })
 
-    # Trigger PRISM immediately if the price is already lower than break-even
     prism_triggered = False
     if payload.current_price is not None:
         net_savings = payload.original_price - payload.current_price - payload.cancellation_fee
         if net_savings > 0:
             asyncio.create_task(_trigger_prism(
-                booking, payload.current_price, payload.seats_remaining, agency,
+                tracking_id, payload.current_price, payload.seats_remaining, agency,
             ))
             prism_triggered = True
 
@@ -375,7 +438,7 @@ async def submit_monitor(
 # GET /bookings
 # ---------------------------------------------------------------------------
 
-@router.get("/bookings", summary="List all monitored bookings")
+@router.get("/bookings")
 async def list_bookings(
     status_filter: Optional[str] = None,
     auth: tuple = Depends(require_api_key),
@@ -393,11 +456,8 @@ async def list_bookings(
 # GET /bookings/{id}
 # ---------------------------------------------------------------------------
 
-@router.get("/bookings/{tracking_id}", summary="Get booking status")
-async def get_booking(
-    tracking_id: str,
-    auth: tuple = Depends(require_api_key),
-):
+@router.get("/bookings/{tracking_id}")
+async def get_booking(tracking_id: str, auth: tuple = Depends(require_api_key)):
     agency, _ = auth
     rows  = _bookings.get_by_agency(agency)
     match = next((r for r in rows if r["booking_id"] == tracking_id), None)
@@ -410,11 +470,8 @@ async def get_booking(
 # GET /bookings/{id}/audit
 # ---------------------------------------------------------------------------
 
-@router.get("/bookings/{tracking_id}/audit", summary="Full audit trail for a booking")
-async def get_booking_audit(
-    tracking_id: str,
-    auth: tuple = Depends(require_api_key),
-):
+@router.get("/bookings/{tracking_id}/audit")
+async def get_booking_audit(tracking_id: str, auth: tuple = Depends(require_api_key)):
     agency, _ = auth
     booking = _bookings.get_by_id(tracking_id)
     if not booking or booking.metadata.get("agency") != agency:
@@ -430,7 +487,10 @@ async def get_booking_audit(
 class PatchBookingRequest(BaseModel):
     current_price:    Optional[float] = Field(
         None, gt=0,
-        description="New market price observed in your GDS. Triggers PRISM evaluation if net_savings > 0.",
+        description=(
+            "New market price from your GDS. Triggers PRISM if net_savings > 0. "
+            "Silently skipped if same as last evaluated price and < 5 min have passed."
+        ),
     )
     seats_remaining:  Optional[int]   = Field(None, ge=0)
     webhook_url:      Optional[str]   = None
@@ -439,7 +499,7 @@ class PatchBookingRequest(BaseModel):
     passenger:        Optional[dict]  = None
 
 
-@router.patch("/bookings/{tracking_id}", summary="Push a new price or update booking details")
+@router.patch("/bookings/{tracking_id}")
 async def patch_booking(
     tracking_id: str,
     payload: PatchBookingRequest,
@@ -458,10 +518,7 @@ async def patch_booking(
 
     if payload.cancellation_fee is not None:
         if payload.cancellation_fee >= booking.original_price:
-            raise HTTPException(
-                status_code=422,
-                detail="cancellation_fee must be less than original_price.",
-            )
+            raise HTTPException(status_code=422, detail="cancellation_fee must be less than original_price.")
         changes["cancellation_fee"] = payload.cancellation_fee
         booking.cancellation_fee = payload.cancellation_fee
 
@@ -495,26 +552,39 @@ async def patch_booking(
     _bookings.upsert(booking)
     _bookings.log_audit(tracking_id, agency, "updated", {"changes": changes, "updated_at": updated_at})
 
-    # Run PRISM if a new price was pushed and there are positive savings
+    # Trigger PRISM only if net_savings > 0 and not a duplicate call
     prism_triggered = False
+    prism_skipped_reason = None
     if payload.current_price is not None:
         net_savings = booking.original_price - payload.current_price - booking.cancellation_fee
-        if net_savings > 0:
-            seats = (
-                payload.seats_remaining
-                if payload.seats_remaining is not None
-                else int(booking.metadata.get("seats_remaining") or 9)
-            )
-            asyncio.create_task(_trigger_prism(
-                booking, payload.current_price, seats, agency,
-            ))
-            prism_triggered = True
+        if net_savings <= 0:
+            prism_skipped_reason = "no_savings"
+        else:
+            last_price    = float(booking.metadata.get("last_evaluated_price") or 0)
+            last_eval_at  = booking.metadata.get("last_evaluated_at", "")
+            same_price    = abs(payload.current_price - last_price) < 0.01
+            recent        = last_eval_at and _seconds_since(last_eval_at) < _PATCH_COOLDOWN
+
+            if same_price and recent:
+                # Same price, evaluated < 5 min ago — suppress duplicate
+                prism_skipped_reason = "duplicate_price_cooldown"
+            else:
+                seats = (
+                    payload.seats_remaining
+                    if payload.seats_remaining is not None
+                    else int(booking.metadata.get("seats_remaining") or 9)
+                )
+                asyncio.create_task(_trigger_prism(
+                    tracking_id, payload.current_price, seats, agency,
+                ))
+                prism_triggered = True
 
     return {
-        "ok":              True,
-        "tracking_id":     tracking_id,
-        "updated":         updated_at,
-        "prism_triggered": prism_triggered,
+        "ok":                  True,
+        "tracking_id":         tracking_id,
+        "updated":             updated_at,
+        "prism_triggered":     prism_triggered,
+        "prism_skipped_reason": prism_skipped_reason,
     }
 
 
@@ -522,11 +592,8 @@ async def patch_booking(
 # DELETE /bookings/{id}
 # ---------------------------------------------------------------------------
 
-@router.delete("/bookings/{tracking_id}", summary="Stop monitoring a booking")
-async def delete_booking(
-    tracking_id: str,
-    auth: tuple = Depends(require_api_key),
-):
+@router.delete("/bookings/{tracking_id}")
+async def delete_booking(tracking_id: str, auth: tuple = Depends(require_api_key)):
     agency, _ = auth
     booking = _bookings.get_by_id(tracking_id)
     if not booking or booking.metadata.get("agency") != agency:
@@ -540,7 +607,7 @@ async def delete_booking(
 # GET /analytics
 # ---------------------------------------------------------------------------
 
-@router.get("/analytics", summary="Agency savings and usage analytics")
+@router.get("/analytics")
 async def analytics(auth: tuple = Depends(require_api_key)):
     agency, api_key = auth
     rows    = _bookings.get_by_agency(agency)
@@ -566,7 +633,7 @@ async def analytics(auth: tuple = Depends(require_api_key)):
 # GET /account
 # ---------------------------------------------------------------------------
 
-@router.get("/account", summary="Agency profile and quota")
+@router.get("/account")
 async def account(auth: tuple = Depends(require_api_key)):
     agency, api_key = auth
     ag = _agencies.get_by_key(api_key)
