@@ -19,6 +19,7 @@ from ryde.models import Booking, Passenger
 from ryde.store import BookingStore
 from .admin import router as admin_router
 from .api_v1 import router as api_v1_router
+from .lemon import router as lemon_router
 from .client_store import ClientStore
 from .stripe_client import StripeClient
 
@@ -27,6 +28,7 @@ log = logging.getLogger(__name__)
 app = FastAPI(title="RYDE")
 app.include_router(api_v1_router)
 app.include_router(admin_router)
+app.include_router(lemon_router)
 templates = Jinja2Templates(directory="web/templates")
 
 _db_path = os.getenv("RYDE_DB_PATH", "ryde.db")
@@ -34,8 +36,8 @@ _clients = ClientStore(_db_path)
 _bookings = BookingStore(_db_path)
 _stripe: Optional[StripeClient] = None
 
-_SUCCESS_FEE = float(os.getenv("SUCCESS_FEE_PERCENT", "20")) / 100
-_BASE_URL = os.getenv("BASE_URL", "http://localhost:8000")
+_SUCCESS_FEE    = float(os.getenv("SUCCESS_FEE_PERCENT", "20")) / 100
+_BASE_URL       = os.getenv("BASE_URL", "http://localhost:8000")
 _MARKET_INTERVAL = float(os.getenv("MARKET_TICK_SECONDS", "3"))
 
 
@@ -95,7 +97,7 @@ def _on_ryde_event(event: dict) -> None:
     if booking_id and event_type != "market":
         try:
             booking = _bookings.get_by_id(booking_id)
-            agency = booking.metadata.get("agency", "") if booking else ""
+            agency  = booking.metadata.get("agency", "") if booking else ""
             _bookings.log_audit(booking_id, agency, event_type, event)
         except Exception:
             pass
@@ -190,6 +192,17 @@ async def api_docs(request: Request):
         "base_url": os.getenv("BASE_URL", "https://your-app.railway.app"),
     })
 
+@app.get("/pricing", response_class=HTMLResponse)
+async def pricing(request: Request):
+    return templates.TemplateResponse(request, "pricing.html", {
+        "starter_url": os.getenv("LS_STARTER_URL", ""),
+        "pro_url":     os.getenv("LS_PRO_URL", ""),
+    })
+
+@app.get("/welcome", response_class=HTMLResponse)
+async def welcome(request: Request):
+    return templates.TemplateResponse(request, "welcome.html")
+
 @app.get("/register", response_class=HTMLResponse)
 async def register_form(request: Request):
     return templates.TemplateResponse(request, "register.html")
@@ -197,14 +210,10 @@ async def register_form(request: Request):
 
 @app.post("/register")
 async def register_submit(
-    name: str = Form(...),
-    email: str = Form(...),
-    origin: str = Form(...),
-    destination: str = Form(...),
-    departure_date: str = Form(...),
-    original_price: float = Form(...),
-    cancellation_fee: float = Form(...),
-    booking_ref: str = Form(...),
+    name: str = Form(...), email: str = Form(...),
+    origin: str = Form(...), destination: str = Form(...),
+    departure_date: str = Form(...), original_price: float = Form(...),
+    cancellation_fee: float = Form(...), booking_ref: str = Form(...),
     seat_preference: str = Form("cheapest"),
 ):
     client_id = str(uuid.uuid4())
@@ -213,12 +222,9 @@ async def register_submit(
         client_id=client_id, name=name, email=email,
         stripe_customer_id=customer.id,
         booking_data={
-            "origin": origin.upper().strip(),
-            "destination": destination.upper().strip(),
-            "departure_date": departure_date,
-            "original_price": original_price,
-            "cancellation_fee": cancellation_fee,
-            "booking_ref": booking_ref.strip(),
+            "origin": origin.upper().strip(), "destination": destination.upper().strip(),
+            "departure_date": departure_date, "original_price": original_price,
+            "cancellation_fee": cancellation_fee, "booking_ref": booking_ref.strip(),
             "seat_preference": seat_preference,
         },
     )
@@ -232,8 +238,7 @@ async def setup_payment_page(request: Request, client_id: str):
         raise HTTPException(status_code=404)
     setup_intent = _get_stripe().create_setup_intent(client["stripe_customer_id"])
     return templates.TemplateResponse(request, "payment.html", {
-        "client_id": client_id,
-        "client_secret": setup_intent.client_secret,
+        "client_id": client_id, "client_secret": setup_intent.client_secret,
         "publishable_key": os.getenv("STRIPE_PUBLISHABLE_KEY", ""),
         "booking": client["booking_data"],
     })
@@ -251,11 +256,9 @@ async def confirm_setup(client_id: str, payment_method_id: str = Form(...)):
     booking = Booking(
         booking_id=client_id,
         passenger=Passenger(
-            title="mr",
-            given_name=name_parts[0],
+            title="mr", given_name=name_parts[0],
             family_name=name_parts[-1] if len(name_parts) > 1 else name_parts[0],
-            born_on="1990-01-01", gender="m",
-            email=client["email"], phone="+10000000000",
+            born_on="1990-01-01", gender="m", email=client["email"], phone="+10000000000",
         ),
         origin=bd["origin"], destination=bd["destination"],
         departure_date=datetime.strptime(bd["departure_date"], "%Y-%m-%d"),
@@ -292,7 +295,7 @@ async def ryde_webhook(request: Request):
     booking_id = payload.get("booking_id")
     if event == "ryde.rebooking" and payload.get("success"):
         savings = float(payload.get("savings_realized", 0))
-        client = _clients.get_client(booking_id)
+        client  = _clients.get_client(booking_id)
         if client and client.get("stripe_payment_method") and savings > 0:
             fee = round(savings * _SUCCESS_FEE, 2)
             try:

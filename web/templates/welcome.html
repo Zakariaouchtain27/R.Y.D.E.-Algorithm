@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RYDE — Your API Key</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+  body { font-family: 'Inter', sans-serif; }
+  .key-box { font-family: 'SF Mono', Menlo, Consolas, monospace; word-break: break-all; }
+</style>
+</head>
+<body class="bg-gray-950 text-white min-h-screen flex items-center justify-center px-4">
+
+  <!-- Loading state -->
+  <div id="loading" class="text-center">
+    <div class="inline-block w-10 h-10 border-4 border-indigo-500 border-t-transparent rounded-full animate-spin mb-6"></div>
+    <h2 class="text-xl font-semibold text-gray-300 mb-2">Setting up your account&hellip;</h2>
+    <p class="text-gray-500 text-sm">This takes just a few seconds.</p>
+  </div>
+
+  <!-- Success state (hidden until ready) -->
+  <div id="success" class="hidden max-w-xl w-full">
+    <div class="text-center mb-8">
+      <div class="inline-flex items-center justify-center w-16 h-16 rounded-full mb-4" style="background: rgba(6,214,160,0.15);">
+        <span class="text-3xl">&#10003;</span>
+      </div>
+      <h1 class="text-3xl font-extrabold mb-2">You&rsquo;re in.</h1>
+      <p class="text-gray-400">Welcome to RYDE, <span id="agencyName" class="text-white font-semibold"></span>.</p>
+    </div>
+
+    <!-- Key display -->
+    <div class="rounded-2xl p-6 mb-4" style="background:#111827; border: 1px solid #1f2937;">
+      <div class="flex items-center justify-between mb-3">
+        <span class="text-xs font-mono font-semibold text-indigo-400">YOUR API KEY</span>
+        <span id="envBadge" class="text-xs px-2 py-0.5 rounded-full font-semibold"></span>
+      </div>
+      <div id="apiKey" class="key-box text-emerald-400 text-sm p-4 rounded-xl mb-4" style="background:#0d1117; border: 1px solid #1e293b;"></div>
+      <button onclick="copyKey()"
+              class="w-full py-2.5 rounded-xl font-semibold text-sm transition-all"
+              style="background: rgba(124,106,247,0.2); color: #a78bfa; border: 1px solid rgba(124,106,247,0.3);"
+              id="copyBtn">
+        Copy key
+      </button>
+    </div>
+
+    <!-- Warning -->
+    <div class="rounded-xl p-4 mb-6" style="background: rgba(245,158,11,0.1); border: 1px solid rgba(245,158,11,0.3);">
+      <p class="text-amber-400 text-sm font-semibold mb-1">&#9888; Save this key now</p>
+      <p class="text-amber-200 text-xs">This is the only time we show your full API key. Store it somewhere safe — a password manager or secrets vault. If you lose it, generate a new one from the admin panel.</p>
+    </div>
+
+    <!-- Next steps -->
+    <div class="grid grid-cols-2 gap-3">
+      <a href="/api"
+         class="flex items-center justify-center gap-2 py-3 rounded-xl font-semibold text-sm transition-all"
+         style="background:#7c6af7; color:white;"
+         onmouseover="this.style.background='#6d5ce6'" onmouseout="this.style.background='#7c6af7'">
+        Read the docs &rarr;
+      </a>
+      <a href="/"
+         class="flex items-center justify-center gap-2 py-3 rounded-xl font-semibold text-sm"
+         style="background:#111827; color:#94a3b8; border:1px solid #1f2937;">
+        Back to home
+      </a>
+    </div>
+  </div>
+
+  <!-- Error state -->
+  <div id="error" class="hidden text-center max-w-md">
+    <div class="text-5xl mb-4">&#9888;</div>
+    <h2 class="text-xl font-semibold mb-3">Something went wrong</h2>
+    <p class="text-gray-400 text-sm mb-6">We couldn&rsquo;t find your account. Your payment was processed &mdash; please email <a href="mailto:api@ryde.io" class="text-indigo-400">api@ryde.io</a> with your order confirmation and we&rsquo;ll sort it out within the hour.</p>
+    <a href="/" class="text-sm text-gray-500 hover:text-white">Back to home</a>
+  </div>
+
+<script>
+  const orderId = new URLSearchParams(location.search).get('order');
+  let apiKeyValue = '';
+
+  async function poll(attempts = 0) {
+    if (attempts > 15) {
+      document.getElementById('loading').classList.add('hidden');
+      document.getElementById('error').classList.remove('hidden');
+      return;
+    }
+    try {
+      const res  = await fetch(`/api/welcome-status?order_id=${encodeURIComponent(orderId)}`);
+      const data = await res.json();
+      if (data.ready) {
+        showSuccess(data);
+      } else {
+        setTimeout(() => poll(attempts + 1), 2000);
+      }
+    } catch {
+      setTimeout(() => poll(attempts + 1), 2000);
+    }
+  }
+
+  function showSuccess(data) {
+    apiKeyValue = data.key;
+    document.getElementById('loading').classList.add('hidden');
+    document.getElementById('success').classList.remove('hidden');
+    document.getElementById('agencyName').textContent = data.agency;
+    document.getElementById('apiKey').textContent = data.key;
+    const badge = document.getElementById('envBadge');
+    if (data.env === 'live') {
+      badge.textContent = 'LIVE';
+      badge.style.cssText = 'background:rgba(6,214,160,0.15);color:#06d6a0;';
+    } else {
+      badge.textContent = 'TEST';
+      badge.style.cssText = 'background:rgba(245,158,11,0.15);color:#f59e0b;';
+    }
+  }
+
+  function copyKey() {
+    navigator.clipboard.writeText(apiKeyValue).then(() => {
+      const btn = document.getElementById('copyBtn');
+      btn.textContent = 'Copied!';
+      btn.style.background = 'rgba(6,214,160,0.2)';
+      btn.style.color = '#06d6a0';
+      btn.style.borderColor = 'rgba(6,214,160,0.3)';
+      setTimeout(() => {
+        btn.textContent = 'Copy key';
+        btn.style.background = 'rgba(124,106,247,0.2)';
+        btn.style.color = '#a78bfa';
+        btn.style.borderColor = 'rgba(124,106,247,0.3)';
+      }, 2500);
+    });
+  }
+
+  if (orderId) {
+    poll();
+  } else {
+    document.getElementById('loading').classList.add('hidden');
+    document.getElementById('error').classList.remove('hidden');
+  }
+</script>
+</body>
+</html>
