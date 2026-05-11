@@ -1,15 +1,21 @@
 """
 LemonSqueezy integration.
 
-Flow:
-  1. Agency visits /pricing and clicks a plan
-  2. LemonSqueezy hosted checkout collects payment
-  3. LS fires POST /webhook/lemonsqueeze  (subscription_created)
-  4. We auto-create the agency + generate API key
-  5. LS redirects buyer to /welcome?order={ls_order_id}
-  6. Welcome page polls /api/welcome-status until key is ready, shows it once
-  7. On subscription_cancelled / subscription_expired → key revoked
-  8. On subscription_resumed → key reactivated
+Subscription lifecycle → API key lifecycle:
+
+  subscription_created          →  create agency + generate API key
+  subscription_payment_failed   →  suspend key immediately
+  subscription_payment_recovery →  reactivate key (payment recovered)
+  subscription_cancelled        →  revoke key
+  subscription_expired          →  revoke key
+  subscription_resumed          →  reactivate key
+
+Flow after checkout:
+  1. Agency pays on LemonSqueezy hosted checkout
+  2. LS fires POST /webhook/lemonsqueeze (subscription_created)
+  3. We auto-create agency + API key in DB
+  4. LS redirects buyer to /welcome?order={ls_order_id}
+  5. Welcome page polls /api/welcome-status, shows key once
 """
 import hashlib
 import hmac
@@ -26,7 +32,7 @@ log = logging.getLogger(__name__)
 router = APIRouter(tags=["LemonSqueezy"])
 
 _LS_WEBHOOK_SECRET = os.getenv("LEMONSQUEEZE_WEBHOOK_SECRET", "")
-_db_path = os.getenv("RYDE_DB_PATH", "ryde.db")
+_db_path  = os.getenv("RYDE_DB_PATH", "ryde.db")
 _agencies = AgencyStore(_db_path)
 
 
@@ -56,14 +62,28 @@ async def ls_webhook(request: Request):
     data  = payload.get("data", {})
     attrs = data.get("attributes", {})
 
-    log.info("LemonSqueezy event", extra={"event": event})
+    # Subscription ID lives at data["id"], not inside attributes
+    ls_subscription_id = str(data.get("id", ""))
+
+    log.info("LemonSqueezy event received", extra={"event": event, "ls_sub": ls_subscription_id})
 
     if event == "subscription_created":
-        _on_subscription_created(data, attrs)
+        _on_subscription_created(ls_subscription_id, attrs)
+
+    elif event == "subscription_payment_failed":
+        # Card declined on renewal — suspend key immediately.
+        # LS will retry; if recovered, subscription_payment_recovery fires.
+        _on_payment_failed(ls_subscription_id)
+
+    elif event == "subscription_payment_recovery":
+        # Retry succeeded — reactivate the key.
+        _on_payment_recovered(ls_subscription_id)
+
     elif event in ("subscription_cancelled", "subscription_expired"):
-        _on_subscription_cancelled(attrs)
+        _on_subscription_cancelled(ls_subscription_id)
+
     elif event == "subscription_resumed":
-        _on_subscription_resumed(attrs)
+        _on_subscription_resumed(ls_subscription_id)
 
     return {"ok": True}
 
@@ -75,27 +95,24 @@ async def welcome_status(order_id: str):
     if not agency:
         return JSONResponse({"ready": False})
     return JSONResponse({
-        "ready":   True,
-        "agency":  agency.name,
-        "email":   agency.email,
-        "key":     agency.api_key,
-        "env":     agency.environment,
+        "ready":  True,
+        "agency": agency.name,
+        "email":  agency.email,
+        "key":    agency.api_key,
+        "env":    agency.environment,
     })
 
 
 # ---------------------------------------------------------------------------
-# Handlers
+# Event handlers
 # ---------------------------------------------------------------------------
 
-def _on_subscription_created(data: dict, attrs: dict) -> None:
-    ls_subscription_id = str(data.get("id", ""))
-    ls_order_id        = str(attrs.get("order_id", ""))
-    customer_name      = attrs.get("user_name") or "Agency"
-    customer_email     = attrs.get("user_email", "")
-    variant_name       = (attrs.get("variant_name") or "").lower()
-
-    # Treat any paid plan as "live"; test/sandbox variants stay "test"
-    environment = "test" if "test" in variant_name or "sandbox" in variant_name else "live"
+def _on_subscription_created(ls_subscription_id: str, attrs: dict) -> None:
+    ls_order_id    = str(attrs.get("order_id", ""))
+    customer_name  = attrs.get("user_name") or "Agency"
+    customer_email = attrs.get("user_email", "")
+    variant_name   = (attrs.get("variant_name") or "").lower()
+    environment    = "test" if "test" in variant_name or "sandbox" in variant_name else "live"
 
     agency = _agencies.create_agency_ls(
         name=customer_name,
@@ -110,17 +127,43 @@ def _on_subscription_created(data: dict, attrs: dict) -> None:
     )
 
 
-def _on_subscription_cancelled(attrs: dict) -> None:
-    ls_sub_id = str(attrs.get("id", ""))
-    agency = _agencies.get_by_ls_subscription(ls_sub_id)
+def _on_payment_failed(ls_subscription_id: str) -> None:
+    """Renewal payment failed — suspend key until payment is recovered."""
+    agency = _agencies.get_by_ls_subscription(ls_subscription_id)
     if agency:
         _agencies.revoke(agency.id)
-        log.info("Agency revoked (subscription cancelled)", extra={"agency": agency.name})
+        log.info(
+            "Agency key suspended (payment failed)",
+            extra={"agency": agency.name, "ls_sub": ls_subscription_id},
+        )
 
 
-def _on_subscription_resumed(attrs: dict) -> None:
-    ls_sub_id = str(attrs.get("id", ""))
-    agency = _agencies.get_by_ls_subscription(ls_sub_id)
+def _on_payment_recovered(ls_subscription_id: str) -> None:
+    """Retry payment succeeded — restore key access."""
+    agency = _agencies.get_by_ls_subscription(ls_subscription_id)
     if agency:
         _agencies.reactivate(agency.id)
-        log.info("Agency reactivated (subscription resumed)", extra={"agency": agency.name})
+        log.info(
+            "Agency key reactivated (payment recovered)",
+            extra={"agency": agency.name, "ls_sub": ls_subscription_id},
+        )
+
+
+def _on_subscription_cancelled(ls_subscription_id: str) -> None:
+    agency = _agencies.get_by_ls_subscription(ls_subscription_id)
+    if agency:
+        _agencies.revoke(agency.id)
+        log.info(
+            "Agency key revoked (subscription cancelled/expired)",
+            extra={"agency": agency.name, "ls_sub": ls_subscription_id},
+        )
+
+
+def _on_subscription_resumed(ls_subscription_id: str) -> None:
+    agency = _agencies.get_by_ls_subscription(ls_subscription_id)
+    if agency:
+        _agencies.reactivate(agency.id)
+        log.info(
+            "Agency key reactivated (subscription resumed)",
+            extra={"agency": agency.name, "ls_sub": ls_subscription_id},
+        )
