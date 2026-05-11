@@ -79,22 +79,32 @@
   const orderId = new URLSearchParams(location.search).get('order');
   let apiKeyValue = '';
 
-  async function poll(attempts = 0) {
-    if (attempts > 15) {
+  // Exponential backoff: 3s, 5s, 8s, 12s, 17s, 23s... (base 3 + attempt^1.5)
+  function delay(attempt) {
+    return (3 + Math.pow(attempt, 1.5)) * 1000;
+  }
+
+  async function poll(attempt = 0) {
+    if (attempt >= 10) {
       document.getElementById('loading').classList.add('hidden');
       document.getElementById('error').classList.remove('hidden');
       return;
     }
     try {
       const res  = await fetch(`/api/welcome-status?order_id=${encodeURIComponent(orderId)}`);
+      if (res.status === 429) {
+        // respect rate limit: wait longer
+        setTimeout(() => poll(attempt + 1), delay(attempt) * 2);
+        return;
+      }
       const data = await res.json();
       if (data.ready) {
         showSuccess(data);
       } else {
-        setTimeout(() => poll(attempts + 1), 2000);
+        setTimeout(() => poll(attempt + 1), delay(attempt));
       }
     } catch {
-      setTimeout(() => poll(attempts + 1), 2000);
+      setTimeout(() => poll(attempt + 1), delay(attempt));
     }
   }
 
