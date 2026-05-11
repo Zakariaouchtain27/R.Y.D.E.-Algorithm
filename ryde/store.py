@@ -1,6 +1,8 @@
 import json
+import os
 import sqlite3
 from datetime import datetime
+from pathlib import Path
 from threading import Lock
 from typing import List, Optional
 
@@ -15,6 +17,8 @@ class BookingStore:
 
     def __init__(self, db_path: str = "ryde.db"):
         self._lock = Lock()
+        # Ensure parent directory exists (critical for Railway volume mounts)
+        Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(db_path, check_same_thread=False)
         self._init_schema()
 
@@ -28,10 +32,33 @@ class BookingStore:
                 updated_at  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        # Immutable decision + lifecycle trail — never update, only insert
+        self._conn.execute("""
+            CREATE TABLE IF NOT EXISTS audit_log (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                booking_id  TEXT NOT NULL,
+                agency      TEXT NOT NULL DEFAULT '',
+                event       TEXT NOT NULL,
+                detail      TEXT NOT NULL DEFAULT '{}',
+                created_at  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS audit_log_booking_idx ON audit_log (booking_id)"
+        )
+        # Idempotency cache — exact response stored for 24 h
+        self._conn.execute("""
+            CREATE TABLE IF NOT EXISTS idempotency_keys (
+                idem_key    TEXT PRIMARY KEY,
+                tracking_id TEXT NOT NULL,
+                response    TEXT NOT NULL,
+                created_at  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
         self._conn.commit()
 
     # ------------------------------------------------------------------
-    # Write
+    # Write — bookings
     # ------------------------------------------------------------------
 
     def upsert(self, booking: Booking) -> None:
@@ -57,7 +84,7 @@ class BookingStore:
             self._conn.commit()
 
     # ------------------------------------------------------------------
-    # Read
+    # Read — bookings
     # ------------------------------------------------------------------
 
     def get_active(self) -> List[Booking]:
@@ -97,7 +124,7 @@ class BookingStore:
         return result
 
     def get_agency_savings(self, agency: str) -> float:
-        """Sum of savings_realized from rebooking_outcomes for this agency's bookings."""
+        """Sum of savings from rebooking_outcomes for this agency's bookings."""
         with self._lock:
             try:
                 row = self._conn.execute(
@@ -113,6 +140,70 @@ class BookingStore:
                 return float(row[0]) if row else 0.0
             except Exception:
                 return 0.0
+
+    # ------------------------------------------------------------------
+    # Audit log
+    # ------------------------------------------------------------------
+
+    def log_audit(
+        self,
+        booking_id: str,
+        agency: str,
+        event: str,
+        detail: dict,
+    ) -> None:
+        """Append one immutable record to the audit trail."""
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO audit_log (booking_id, agency, event, detail) VALUES (?, ?, ?, ?)",
+                (booking_id, agency, event, json.dumps(detail)),
+            )
+            self._conn.commit()
+
+    def get_audit(self, booking_id: str) -> List[dict]:
+        """Return the full ordered audit trail for a booking."""
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT id, agency, event, detail, created_at
+                FROM audit_log
+                WHERE booking_id = ?
+                ORDER BY id ASC
+                """,
+                (booking_id,),
+            ).fetchall()
+        return [
+            {
+                "seq":       row[0],
+                "agency":    row[1],
+                "event":     row[2],
+                "detail":    json.loads(row[3]),
+                "timestamp": row[4],
+            }
+            for row in rows
+        ]
+
+    # ------------------------------------------------------------------
+    # Idempotency cache
+    # ------------------------------------------------------------------
+
+    def get_idempotency(self, idem_key: str) -> Optional[dict]:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT tracking_id, response FROM idempotency_keys WHERE idem_key = ?",
+                (idem_key,),
+            ).fetchone()
+        if row:
+            return {"tracking_id": row[0], "response": json.loads(row[1])}
+        return None
+
+    def set_idempotency(self, idem_key: str, tracking_id: str, response: dict) -> None:
+        with self._lock:
+            self._conn.execute(
+                "INSERT OR IGNORE INTO idempotency_keys (idem_key, tracking_id, response) VALUES (?, ?, ?)",
+                (idem_key, tracking_id, json.dumps(response)),
+            )
+            self._conn.commit()
 
     # ------------------------------------------------------------------
     # Serialization

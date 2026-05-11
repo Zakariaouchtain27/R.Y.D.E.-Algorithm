@@ -3,11 +3,18 @@ RYDE B2B API v1
 ===============
 All endpoints require:  X-API-Key: <agency_key>
 
+Idempotency
+-----------
+POST /api/v1/monitor accepts an optional  Idempotency-Key: <uuid>  header.
+Sending the same key a second time returns the original 201 response from
+cache — no duplicate booking is created.  Safe to retry on network errors.
+
 Endpoints
 ---------
 POST   /api/v1/monitor              Submit a booking for PRISM monitoring
 GET    /api/v1/bookings             List all bookings for your agency
 GET    /api/v1/bookings/{id}        Get a single booking + status
+GET    /api/v1/bookings/{id}/audit  Immutable decision + lifecycle trail
 PATCH  /api/v1/bookings/{id}        Update webhook URL, passenger, or fee
 DELETE /api/v1/bookings/{id}        Stop monitoring a booking
 GET    /api/v1/analytics            Agency-level savings + usage stats
@@ -144,9 +151,18 @@ class MonitorRequest(BaseModel):
 async def submit_monitor(
     payload: MonitorRequest,
     auth: tuple = Depends(require_api_key),
+    idempotency_key: Optional[str] = Header(default=None),
 ):
     agency, _ = auth
+
+    # Idempotency check — return cached response on duplicate key
+    if idempotency_key:
+        cached = _bookings.get_idempotency(idempotency_key)
+        if cached:
+            return cached["response"]
+
     tracking_id = f"b2b_{uuid.uuid4().hex[:16]}"
+    now_iso = datetime.utcnow().isoformat() + "Z"
 
     booking = Booking(
         booking_id=tracking_id,
@@ -169,20 +185,37 @@ async def submit_monitor(
         metadata={
             "source":       "b2b_api_v1",
             "agency":       agency,
-            "submitted_at": datetime.utcnow().isoformat() + "Z",
+            "submitted_at": now_iso,
         },
     )
     _bookings.upsert(booking)
 
-    return {
-        "tracking_id":   tracking_id,
-        "status":        "monitoring",
-        "agency":        agency,
-        "route":         f"{payload.origin}-{payload.destination}",
+    # Audit: booking submitted
+    _bookings.log_audit(tracking_id, agency, "submitted", {
+        "route":           f"{payload.origin}-{payload.destination}",
+        "original_price":  payload.original_price,
+        "cancellation_fee": payload.cancellation_fee,
+        "cabin_class":     payload.cabin_class,
+        "departure_date":  payload.departure_date,
+        "webhook_url":     payload.webhook_url,
+        "reference":       payload.reference,
+    })
+
+    response = {
+        "tracking_id":    tracking_id,
+        "status":         "monitoring",
+        "agency":         agency,
+        "route":          f"{payload.origin}-{payload.destination}",
         "departure_date": payload.departure_date,
-        "webhook_url":   payload.webhook_url,
-        "submitted_at":  datetime.utcnow().isoformat() + "Z",
+        "webhook_url":    payload.webhook_url,
+        "submitted_at":   now_iso,
     }
+
+    # Cache response for idempotency
+    if idempotency_key:
+        _bookings.set_idempotency(idempotency_key, tracking_id, response)
+
+    return response
 
 
 # ---------------------------------------------------------------------------
@@ -203,8 +236,8 @@ async def list_bookings(
         rows = [r for r in rows if not r.get("_active")]
 
     return {
-        "agency":  agency,
-        "count":   len(rows),
+        "agency":   agency,
+        "count":    len(rows),
         "bookings": [_booking_to_response(r) for r in rows],
     }
 
@@ -224,6 +257,29 @@ async def get_booking(
     if not match:
         raise HTTPException(status_code=404, detail="Booking not found.")
     return _booking_to_response(match)
+
+
+# ---------------------------------------------------------------------------
+# GET /bookings/{id}/audit  — immutable decision trail
+# ---------------------------------------------------------------------------
+
+@router.get("/bookings/{tracking_id}/audit", summary="Get full audit trail for a booking")
+async def get_booking_audit(
+    tracking_id: str,
+    auth: tuple = Depends(require_api_key),
+):
+    agency, _ = auth
+    # Ownership check: agency must own this booking
+    booking = _bookings.get_by_id(tracking_id)
+    if not booking or booking.metadata.get("agency") != agency:
+        raise HTTPException(status_code=404, detail="Booking not found.")
+
+    trail = _bookings.get_audit(tracking_id)
+    return {
+        "tracking_id": tracking_id,
+        "count":       len(trail),
+        "trail":       trail,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -251,14 +307,19 @@ async def patch_booking(
     if not booking or booking.metadata.get("agency") != agency:
         raise HTTPException(status_code=404, detail="Booking not found.")
 
+    changes: dict = {}
     if payload.webhook_url is not None:
+        changes["webhook_url"] = payload.webhook_url
         booking.notify_webhook = payload.webhook_url
     if payload.cancellation_fee is not None:
+        changes["cancellation_fee"] = payload.cancellation_fee
         booking.cancellation_fee = payload.cancellation_fee
     if payload.cabin_class is not None:
+        changes["cabin_class"] = payload.cabin_class
         booking.cabin_class = payload.cabin_class
     if payload.passenger:
         p = payload.passenger
+        changes["passenger"] = p
         booking.passenger = Passenger(
             title=p.get("title", booking.passenger.title),
             given_name=p.get("given_name", booking.passenger.given_name),
@@ -268,10 +329,17 @@ async def patch_booking(
             email=p.get("email", booking.passenger.email),
             phone=p.get("phone", booking.passenger.phone),
         )
-    booking.metadata["updated_at"] = datetime.utcnow().isoformat() + "Z"
+
+    updated_at = datetime.utcnow().isoformat() + "Z"
+    booking.metadata["updated_at"] = updated_at
     _bookings.upsert(booking)
 
-    return {"ok": True, "tracking_id": tracking_id, "updated": datetime.utcnow().isoformat() + "Z"}
+    _bookings.log_audit(tracking_id, agency, "updated", {
+        "changes": changes,
+        "updated_at": updated_at,
+    })
+
+    return {"ok": True, "tracking_id": tracking_id, "updated": updated_at}
 
 
 # ---------------------------------------------------------------------------
@@ -287,7 +355,12 @@ async def delete_booking(
     booking = _bookings.get_by_id(tracking_id)
     if not booking or booking.metadata.get("agency") != agency:
         raise HTTPException(status_code=404, detail="Booking not found.")
+
     _bookings.deactivate(tracking_id)
+    _bookings.log_audit(tracking_id, agency, "stopped", {
+        "stopped_at": datetime.utcnow().isoformat() + "Z",
+    })
+
     return {"ok": True, "tracking_id": tracking_id, "status": "stopped"}
 
 
@@ -307,16 +380,16 @@ async def analytics(
     ag_obj  = _agencies.get_by_key(api_key)
 
     return {
-        "agency":                agency,
-        "total_monitored":       len(rows),
-        "currently_monitoring":  len(active),
-        "stopped":               len(stopped),
-        "total_savings_usd":     round(savings, 2),
-        "ryde_fees_usd":         round(savings * 0.20, 2),
-        "net_savings_usd":       round(savings * 0.80, 2),
-        "total_api_calls":       ag_obj.total_calls if ag_obj else 0,
-        "last_api_call":         ag_obj.last_call_at if ag_obj else None,
-        "rate_limit":            f"{_RATE_LIMIT} requests / {_RATE_WINDOW}s",
+        "agency":               agency,
+        "total_monitored":      len(rows),
+        "currently_monitoring": len(active),
+        "stopped":              len(stopped),
+        "total_savings_usd":    round(savings, 2),
+        "ryde_fees_usd":        round(savings * 0.20, 2),
+        "net_savings_usd":      round(savings * 0.80, 2),
+        "total_api_calls":      ag_obj.total_calls if ag_obj else 0,
+        "last_api_call":        ag_obj.last_call_at if ag_obj else None,
+        "rate_limit":           f"{_RATE_LIMIT} requests / {_RATE_WINDOW}s",
     }
 
 
@@ -343,6 +416,7 @@ async def account(
             "POST   /api/v1/monitor",
             "GET    /api/v1/bookings",
             "GET    /api/v1/bookings/{id}",
+            "GET    /api/v1/bookings/{id}/audit",
             "PATCH  /api/v1/bookings/{id}",
             "DELETE /api/v1/bookings/{id}",
             "GET    /api/v1/analytics",

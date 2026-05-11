@@ -2,10 +2,11 @@ import asyncio
 import os
 import uuid
 from datetime import datetime
+from pathlib import Path
 from typing import Optional, Set
 
 from fastapi import FastAPI, Form, HTTPException, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from ryde import events as ryde_events
@@ -81,14 +82,32 @@ _market_task: Optional[asyncio.Task] = None
 
 
 def _on_ryde_event(event: dict) -> None:
+    """Called from the bot thread — bridges to the async event loop."""
     if _loop is None or _loop.is_closed():
         return
+
+    # Write bot decision/rebooking events to the audit log
+    booking_id = event.get("booking_id", "")
+    event_type = event.get("type", "decision")
+    if booking_id and event_type != "market":
+        try:
+            booking = _bookings.get_by_id(booking_id)
+            agency = booking.metadata.get("agency", "") if booking else ""
+            _bookings.log_audit(booking_id, agency, event_type, event)
+        except Exception:
+            pass  # never let audit failure block the WebSocket broadcast
+
     asyncio.run_coroutine_threadsafe(_manager.broadcast(event), _loop)
 
 
 @app.on_event("startup")
 async def _startup() -> None:
     global _loop, _market_task
+
+    # Guarantee the DB directory exists before any store opens a connection
+    # (critical when RYDE_DB_PATH=/data/ryde.db and the Railway volume is mounted)
+    Path(_db_path).parent.mkdir(parents=True, exist_ok=True)
+
     _loop = asyncio.get_running_loop()
     ryde_events.subscribe(_on_ryde_event)
     _market_task = asyncio.create_task(get_market().run(interval=_MARKET_INTERVAL))
@@ -100,6 +119,39 @@ async def _shutdown() -> None:
     get_market().stop()
     if _market_task is not None:
         _market_task.cancel()
+
+
+# ---------------------------------------------------------------------------
+# Health check
+# ---------------------------------------------------------------------------
+
+@app.get("/health")
+async def health():
+    checks: dict = {}
+
+    # DB liveness
+    try:
+        _bookings._conn.execute("SELECT 1").fetchone()
+        checks["db"] = "ok"
+    except Exception as exc:
+        checks["db"] = f"error: {exc}"
+
+    # Market task
+    if _market_task and not _market_task.done():
+        checks["market"] = "ok"
+    else:
+        checks["market"] = "stopped"
+
+    overall = "ok" if all(v == "ok" for v in checks.values()) else "degraded"
+    code = 200 if overall == "ok" else 503
+    return JSONResponse(
+        status_code=code,
+        content={
+            "status":    overall,
+            "checks":    checks,
+            "timestamp": datetime.utcnow().isoformat() + "Z",
+        },
+    )
 
 
 @app.websocket("/ws/ticker")
