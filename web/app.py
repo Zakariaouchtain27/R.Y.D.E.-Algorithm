@@ -38,12 +38,9 @@ _bookings = BookingStore(_db_path)
 _agencies = AgencyStore(_db_path)
 _stripe: Optional[StripeClient] = None
 
-_SUCCESS_FEE     = float(os.getenv("SUCCESS_FEE_PERCENT", "20")) / 100
 _BASE_URL        = os.getenv("BASE_URL", "http://localhost:8000")
 _MARKET_INTERVAL = float(os.getenv("MARKET_TICK_SECONDS", "3"))
-# Background scan runs every 15 min; per-booking cadence is controlled
-# inside scan_all_active() based on days_to_departure.
-_SCAN_INTERVAL = int(os.getenv("PRISM_SCAN_INTERVAL_SECONDS", "900"))  # 15 min
+_SCAN_INTERVAL   = int(os.getenv("PRISM_SCAN_INTERVAL_SECONDS", "900"))  # 15 min
 
 
 def _get_stripe() -> StripeClient:
@@ -113,13 +110,12 @@ def _on_ryde_event(event: dict) -> None:
 async def _prism_background_scan() -> None:
     """
     Runs every PRISM_SCAN_INTERVAL_SECONDS (default 15 min).
-    The actual per-booking cadence is controlled inside scan_all_active()
-    based on days_to_departure:
+    Per-booking cadence inside scan_all_active() based on days_to_departure:
       >= 14 days  →  every 60 min
        7–14 days  →  every 30 min
         < 7 days  →  every 15 min
     """
-    await asyncio.sleep(60)  # let the app fully start before first scan
+    await asyncio.sleep(60)
     while True:
         try:
             count = await scan_all_active()
@@ -366,18 +362,10 @@ async def ryde_webhook(request: Request):
     if event == "ryde.rebooking" and payload.get("success"):
         savings = float(payload.get("savings_realized", 0))
         client  = _clients.get_client(booking_id)
-        if client and client.get("stripe_payment_method") and savings > 0:
-            fee = round(savings * _SUCCESS_FEE, 2)
-            try:
-                _get_stripe().charge(
-                    customer_id=client["stripe_customer_id"],
-                    payment_method_id=client["stripe_payment_method"],
-                    amount_usd=fee,
-                    description=f"RYDE saved you ${savings:.2f} on your flight",
-                )
-                _clients.add_savings(booking_id, savings)
-            except Exception as exc:
-                log.error("Stripe charge failed", extra={"booking_id": booking_id, "error": str(exc)})
+        if client and savings > 0:
+            # Record savings for dashboard display only — billing is invoiced
+            # manually at month-end via the agency's subscription plan.
+            _clients.add_savings(booking_id, savings)
     if booking_id:
         _clients.log_event(booking_id, event, payload)
     return {"ok": True}
