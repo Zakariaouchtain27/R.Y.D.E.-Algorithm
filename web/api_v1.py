@@ -25,10 +25,10 @@ import time
 import uuid
 from collections import defaultdict
 from datetime import datetime
-from typing import List, Optional
+from typing import List, Literal, Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException, status
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from ryde.agency_store import AgencyStore
 from ryde.models import Booking, Passenger
@@ -45,14 +45,13 @@ _agencies = AgencyStore(_db_path)
 # ---------------------------------------------------------------------------
 
 _call_log: dict = defaultdict(list)
-_RATE_LIMIT   = 60
-_RATE_WINDOW  = 60  # seconds
+_RATE_LIMIT  = 60
+_RATE_WINDOW = 60
 
 
 def _check_rate(api_key: str) -> None:
     now = time.monotonic()
-    log = _call_log[api_key]
-    _call_log[api_key] = [t for t in log if now - t < _RATE_WINDOW]
+    _call_log[api_key] = [t for t in _call_log[api_key] if now - t < _RATE_WINDOW]
     if len(_call_log[api_key]) >= _RATE_LIMIT:
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
@@ -68,7 +67,7 @@ def _check_rate(api_key: str) -> None:
 
 async def require_api_key(
     x_api_key: Optional[str] = Header(default=None),
-) -> tuple:   # returns (agency_name, raw_key)
+) -> tuple:
     if not x_api_key:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -91,29 +90,24 @@ async def require_api_key(
 # ---------------------------------------------------------------------------
 
 def _booking_to_response(d: dict) -> dict:
-    """Convert raw booking dict (from get_by_agency) to API response shape."""
     return {
-        "tracking_id":     d["booking_id"],
-        "route":           f"{d['origin']}-{d['destination']}",
-        "origin":          d["origin"],
-        "destination":     d["destination"],
-        "departure_date":  d["departure_date"][:10],
-        "original_price":  d["original_price"],
+        "tracking_id":      d["booking_id"],
+        "route":            f"{d['origin']}-{d['destination']}",
+        "origin":           d["origin"],
+        "destination":      d["destination"],
+        "departure_date":   d["departure_date"][:10],
+        "original_price":   d["original_price"],
         "cancellation_fee": d["cancellation_fee"],
-        "currency":        d["currency"],
-        "cabin_class":     d.get("cabin_class", "economy"),
-        "status":          "monitoring" if d.get("_active", True) else "stopped",
-        "webhook_url":     d.get("notify_webhook"),
-        "passenger_set":   d["passenger"]["given_name"] != "Pending",
-        "submitted_at":    d.get("_created_at"),
-        "updated_at":      d.get("_updated_at"),
-        "metadata":        d.get("metadata", {}),
+        "currency":         d["currency"],
+        "cabin_class":      d.get("cabin_class", "economy"),
+        "fare_type":        d.get("metadata", {}).get("fare_type", "refundable"),
+        "status":           "monitoring" if d.get("_active", True) else "stopped",
+        "webhook_url":      d.get("notify_webhook"),
+        "passenger_set":    d["passenger"]["given_name"] != "Pending",
+        "submitted_at":     d.get("_created_at"),
+        "updated_at":       d.get("_updated_at"),
+        "metadata":         d.get("metadata", {}),
     }
-
-
-def _assert_owns(booking_dict: dict, agency: str) -> None:
-    if booking_dict.get("metadata", {}).get("agency") != agency:
-        raise HTTPException(status_code=404, detail="Booking not found.")
 
 
 # ---------------------------------------------------------------------------
@@ -124,11 +118,15 @@ class MonitorRequest(BaseModel):
     origin:           str   = Field(..., min_length=3, max_length=3, description="IATA origin, e.g. JFK")
     destination:      str   = Field(..., min_length=3, max_length=3, description="IATA destination, e.g. CDG")
     departure_date:   str   = Field(..., description="YYYY-MM-DD")
-    original_price:   float = Field(..., gt=0,  description="Price paid in USD")
-    cancellation_fee: float = Field(..., ge=0,  description="Fee to cancel + rebook")
-    cabin_class:      str   = Field("economy", description="economy | business | first")
-    webhook_url:      Optional[str] = Field(None, description="POST target for PRISM decisions")
-    reference:        Optional[str] = Field(None, description="Your internal booking reference")
+    original_price:   float = Field(..., gt=0, description="Price paid in USD")
+    cancellation_fee: float = Field(..., ge=0, description="Airline fee to cancel and rebook")
+    cabin_class:      Literal["economy", "premium_economy", "business", "first"] = "economy"
+    fare_type:        Literal["refundable", "partially_refundable"] = Field(
+        "refundable",
+        description="refundable | partially_refundable. Non-refundable fares are rejected.",
+    )
+    webhook_url:  Optional[str] = Field(None, description="POST target for PRISM decisions")
+    reference:    Optional[str] = Field(None, description="Your internal booking reference")
 
     @field_validator("origin", "destination")
     @classmethod
@@ -146,6 +144,17 @@ class MonitorRequest(BaseModel):
             raise ValueError("departure_date must be in the future")
         return v
 
+    @model_validator(mode="after")
+    def _economics_check(self) -> "MonitorRequest":
+        # Rebooking can only save money if the fee is lower than the ticket price
+        if self.cancellation_fee >= self.original_price:
+            raise ValueError(
+                f"cancellation_fee ({self.cancellation_fee}) must be less than "
+                f"original_price ({self.original_price}). "
+                "Rebooking would never produce a saving."
+            )
+        return self
+
 
 @router.post("/monitor", status_code=201, summary="Submit booking for monitoring")
 async def submit_monitor(
@@ -155,7 +164,7 @@ async def submit_monitor(
 ):
     agency, _ = auth
 
-    # Idempotency check — return cached response on duplicate key
+    # Idempotency: return cached response on duplicate key
     if idempotency_key:
         cached = _bookings.get_idempotency(idempotency_key)
         if cached:
@@ -185,20 +194,21 @@ async def submit_monitor(
         metadata={
             "source":       "b2b_api_v1",
             "agency":       agency,
+            "fare_type":    payload.fare_type,
             "submitted_at": now_iso,
         },
     )
     _bookings.upsert(booking)
 
-    # Audit: booking submitted
     _bookings.log_audit(tracking_id, agency, "submitted", {
-        "route":           f"{payload.origin}-{payload.destination}",
-        "original_price":  payload.original_price,
+        "route":            f"{payload.origin}-{payload.destination}",
+        "original_price":   payload.original_price,
         "cancellation_fee": payload.cancellation_fee,
-        "cabin_class":     payload.cabin_class,
-        "departure_date":  payload.departure_date,
-        "webhook_url":     payload.webhook_url,
-        "reference":       payload.reference,
+        "cabin_class":      payload.cabin_class,
+        "fare_type":        payload.fare_type,
+        "departure_date":   payload.departure_date,
+        "webhook_url":      payload.webhook_url,
+        "reference":        payload.reference,
     })
 
     response = {
@@ -206,12 +216,12 @@ async def submit_monitor(
         "status":         "monitoring",
         "agency":         agency,
         "route":          f"{payload.origin}-{payload.destination}",
+        "fare_type":      payload.fare_type,
         "departure_date": payload.departure_date,
         "webhook_url":    payload.webhook_url,
         "submitted_at":   now_iso,
     }
 
-    # Cache response for idempotency
     if idempotency_key:
         _bookings.set_idempotency(idempotency_key, tracking_id, response)
 
@@ -219,31 +229,25 @@ async def submit_monitor(
 
 
 # ---------------------------------------------------------------------------
-# GET /bookings  — list all bookings for this agency
+# GET /bookings
 # ---------------------------------------------------------------------------
 
 @router.get("/bookings", summary="List all monitored bookings")
 async def list_bookings(
-    status_filter: Optional[str] = None,   # "monitoring" | "stopped"
+    status_filter: Optional[str] = None,
     auth: tuple = Depends(require_api_key),
 ):
     agency, _ = auth
     rows = _bookings.get_by_agency(agency)
-
     if status_filter == "monitoring":
         rows = [r for r in rows if r.get("_active")]
     elif status_filter == "stopped":
         rows = [r for r in rows if not r.get("_active")]
-
-    return {
-        "agency":   agency,
-        "count":    len(rows),
-        "bookings": [_booking_to_response(r) for r in rows],
-    }
+    return {"agency": agency, "count": len(rows), "bookings": [_booking_to_response(r) for r in rows]}
 
 
 # ---------------------------------------------------------------------------
-# GET /bookings/{id}  — single booking detail
+# GET /bookings/{id}
 # ---------------------------------------------------------------------------
 
 @router.get("/bookings/{tracking_id}", summary="Get booking status")
@@ -260,40 +264,31 @@ async def get_booking(
 
 
 # ---------------------------------------------------------------------------
-# GET /bookings/{id}/audit  — immutable decision trail
+# GET /bookings/{id}/audit
 # ---------------------------------------------------------------------------
 
-@router.get("/bookings/{tracking_id}/audit", summary="Get full audit trail for a booking")
+@router.get("/bookings/{tracking_id}/audit", summary="Full audit trail for a booking")
 async def get_booking_audit(
     tracking_id: str,
     auth: tuple = Depends(require_api_key),
 ):
     agency, _ = auth
-    # Ownership check: agency must own this booking
     booking = _bookings.get_by_id(tracking_id)
     if not booking or booking.metadata.get("agency") != agency:
         raise HTTPException(status_code=404, detail="Booking not found.")
-
     trail = _bookings.get_audit(tracking_id)
-    return {
-        "tracking_id": tracking_id,
-        "count":       len(trail),
-        "trail":       trail,
-    }
+    return {"tracking_id": tracking_id, "count": len(trail), "trail": trail}
 
 
 # ---------------------------------------------------------------------------
-# PATCH /bookings/{id}  — update webhook or passenger details
+# PATCH /bookings/{id}
 # ---------------------------------------------------------------------------
 
 class PatchBookingRequest(BaseModel):
     webhook_url:      Optional[str]   = None
     cancellation_fee: Optional[float] = Field(None, ge=0)
     cabin_class:      Optional[str]   = None
-    passenger: Optional[dict] = Field(
-        None,
-        description="Passenger fields: title, given_name, family_name, born_on, gender, email, phone"
-    )
+    passenger:        Optional[dict]  = None
 
 
 @router.patch("/bookings/{tracking_id}", summary="Update booking details")
@@ -312,6 +307,11 @@ async def patch_booking(
         changes["webhook_url"] = payload.webhook_url
         booking.notify_webhook = payload.webhook_url
     if payload.cancellation_fee is not None:
+        if payload.cancellation_fee >= booking.original_price:
+            raise HTTPException(
+                status_code=422,
+                detail="cancellation_fee must be less than original_price.",
+            )
         changes["cancellation_fee"] = payload.cancellation_fee
         booking.cancellation_fee = payload.cancellation_fee
     if payload.cabin_class is not None:
@@ -333,17 +333,13 @@ async def patch_booking(
     updated_at = datetime.utcnow().isoformat() + "Z"
     booking.metadata["updated_at"] = updated_at
     _bookings.upsert(booking)
-
-    _bookings.log_audit(tracking_id, agency, "updated", {
-        "changes": changes,
-        "updated_at": updated_at,
-    })
+    _bookings.log_audit(tracking_id, agency, "updated", {"changes": changes, "updated_at": updated_at})
 
     return {"ok": True, "tracking_id": tracking_id, "updated": updated_at}
 
 
 # ---------------------------------------------------------------------------
-# DELETE /bookings/{id}  — stop monitoring
+# DELETE /bookings/{id}
 # ---------------------------------------------------------------------------
 
 @router.delete("/bookings/{tracking_id}", summary="Stop monitoring a booking")
@@ -355,30 +351,23 @@ async def delete_booking(
     booking = _bookings.get_by_id(tracking_id)
     if not booking or booking.metadata.get("agency") != agency:
         raise HTTPException(status_code=404, detail="Booking not found.")
-
     _bookings.deactivate(tracking_id)
-    _bookings.log_audit(tracking_id, agency, "stopped", {
-        "stopped_at": datetime.utcnow().isoformat() + "Z",
-    })
-
+    _bookings.log_audit(tracking_id, agency, "stopped", {"stopped_at": datetime.utcnow().isoformat() + "Z"})
     return {"ok": True, "tracking_id": tracking_id, "status": "stopped"}
 
 
 # ---------------------------------------------------------------------------
-# GET /analytics  — savings + usage for this agency
+# GET /analytics
 # ---------------------------------------------------------------------------
 
 @router.get("/analytics", summary="Agency savings and usage analytics")
-async def analytics(
-    auth: tuple = Depends(require_api_key),
-):
+async def analytics(auth: tuple = Depends(require_api_key)):
     agency, api_key = auth
     rows    = _bookings.get_by_agency(agency)
     active  = [r for r in rows if r.get("_active")]
     stopped = [r for r in rows if not r.get("_active")]
     savings = _bookings.get_agency_savings(agency)
     ag_obj  = _agencies.get_by_key(api_key)
-
     return {
         "agency":               agency,
         "total_monitored":      len(rows),
@@ -394,13 +383,11 @@ async def analytics(
 
 
 # ---------------------------------------------------------------------------
-# GET /account  — agency profile
+# GET /account
 # ---------------------------------------------------------------------------
 
 @router.get("/account", summary="Agency profile and quota")
-async def account(
-    auth: tuple = Depends(require_api_key),
-):
+async def account(auth: tuple = Depends(require_api_key)):
     agency, api_key = auth
     ag = _agencies.get_by_key(api_key)
     return {
