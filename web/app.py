@@ -19,7 +19,7 @@ from ryde.models import Booking, Passenger
 from ryde.store import BookingStore
 from ryde.agency_store import AgencyStore
 from .admin import router as admin_router
-from .api_v1 import router as api_v1_router
+from .api_v1 import router as api_v1_router, scan_all_active
 from .lemon import router as lemon_router
 from .client_store import ClientStore
 from .stripe_client import StripeClient
@@ -32,7 +32,7 @@ app.include_router(admin_router)
 app.include_router(lemon_router)
 templates = Jinja2Templates(directory="web/templates")
 
-_db_path = os.getenv("RYDE_DB_PATH", "ryde.db")
+_db_path  = os.getenv("RYDE_DB_PATH", "ryde.db")
 _clients  = ClientStore(_db_path)
 _bookings = BookingStore(_db_path)
 _agencies = AgencyStore(_db_path)
@@ -41,6 +41,7 @@ _stripe: Optional[StripeClient] = None
 _SUCCESS_FEE     = float(os.getenv("SUCCESS_FEE_PERCENT", "20")) / 100
 _BASE_URL        = os.getenv("BASE_URL", "http://localhost:8000")
 _MARKET_INTERVAL = float(os.getenv("MARKET_TICK_SECONDS", "3"))
+_SCAN_INTERVAL   = int(os.getenv("PRISM_SCAN_INTERVAL_SECONDS", "3600"))  # default: 1 hour
 
 
 def _get_stripe() -> StripeClient:
@@ -89,6 +90,7 @@ class ConnectionManager:
 _manager = ConnectionManager()
 _loop: Optional[asyncio.AbstractEventLoop] = None
 _market_task: Optional[asyncio.Task] = None
+_scan_task:   Optional[asyncio.Task] = None
 
 
 def _on_ryde_event(event: dict) -> None:
@@ -106,9 +108,26 @@ def _on_ryde_event(event: dict) -> None:
     asyncio.run_coroutine_threadsafe(_manager.broadcast(event), _loop)
 
 
+async def _prism_background_scan() -> None:
+    """
+    Runs every PRISM_SCAN_INTERVAL_SECONDS (default 1 hour).
+    Re-evaluates all active B2B bookings using their stored current_price
+    so agencies receive decisions even if they don't push price updates.
+    """
+    # First run after 60s — let the app fully start first
+    await asyncio.sleep(60)
+    while True:
+        try:
+            count = await scan_all_active()
+            log.info("Hourly PRISM scan complete: %d booking(s) evaluated", count)
+        except Exception as exc:
+            log.error("Hourly PRISM scan failed: %s", exc)
+        await asyncio.sleep(_SCAN_INTERVAL)
+
+
 @app.on_event("startup")
 async def _startup() -> None:
-    global _loop, _market_task
+    global _loop, _market_task, _scan_task
     Path(_db_path).parent.mkdir(parents=True, exist_ok=True)
 
     db_url = os.getenv("DATABASE_URL", "")
@@ -130,6 +149,7 @@ async def _startup() -> None:
     _loop = asyncio.get_running_loop()
     ryde_events.subscribe(_on_ryde_event)
     _market_task = asyncio.create_task(get_market().run(interval=_MARKET_INTERVAL))
+    _scan_task   = asyncio.create_task(_prism_background_scan())
 
 
 @app.on_event("shutdown")
@@ -138,6 +158,8 @@ async def _shutdown() -> None:
     get_market().stop()
     if _market_task is not None:
         _market_task.cancel()
+    if _scan_task is not None:
+        _scan_task.cancel()
 
 
 # ---------------------------------------------------------------------------
@@ -154,6 +176,7 @@ async def health():
     except Exception as exc:
         checks["db"] = f"error: {exc}"
     checks["market"] = "ok" if (_market_task and not _market_task.done()) else "stopped"
+    checks["prism_scan"] = "ok" if (_scan_task and not _scan_task.done()) else "stopped"
     overall = "ok" if all(v == "ok" for v in checks.values()) else "degraded"
     return JSONResponse(
         status_code=200 if overall == "ok" else 503,
@@ -219,7 +242,7 @@ async def signup_form(request: Request):
 @app.post("/signup", response_class=HTMLResponse)
 async def signup_submit(
     request: Request,
-    name: str  = Form(...),
+    name:  str = Form(...),
     email: str = Form(...),
 ):
     name  = name.strip()
@@ -332,7 +355,7 @@ async def dashboard(request: Request, client_id: str):
 
 @app.post("/webhook/ryde")
 async def ryde_webhook(request: Request):
-    payload = await request.json()
+    payload    = await request.json()
     event      = payload.get("event")
     booking_id = payload.get("booking_id")
     if event == "ryde.rebooking" and payload.get("success"):
