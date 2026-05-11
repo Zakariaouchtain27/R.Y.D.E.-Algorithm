@@ -8,54 +8,104 @@ from typing import List, Optional
 
 from .models import Booking, Passenger
 
+_DATABASE_URL = os.getenv("DATABASE_URL", "")
+
 
 class BookingStore:
     """
-    SQLite-backed store for active bookings.
-    Swap for Postgres + SQLAlchemy in production.
+    SQLite-backed store for local dev; PostgreSQL in production.
+    Set DATABASE_URL to switch engines — no other changes needed.
     """
 
     def __init__(self, db_path: str = "ryde.db"):
         self._lock = Lock()
-        # Ensure parent directory exists (critical for Railway volume mounts)
-        Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(db_path, check_same_thread=False)
+        self._pg = bool(_DATABASE_URL)
+
+        if self._pg:
+            import psycopg2
+            import psycopg2.extras
+            self._conn = psycopg2.connect(_DATABASE_URL)
+            self._conn.autocommit = False
+            self._dict_cursor = psycopg2.extras.DictCursor
+        else:
+            Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+            self._conn = sqlite3.connect(db_path, check_same_thread=False)
+            self._dict_cursor = None
+
         self._init_schema()
 
-    def _init_schema(self):
-        self._conn.execute("""
-            CREATE TABLE IF NOT EXISTS bookings (
-                booking_id  TEXT PRIMARY KEY,
-                data        TEXT NOT NULL,
-                active      INTEGER NOT NULL DEFAULT 1,
-                created_at  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                updated_at  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        # Immutable decision + lifecycle trail — never update, only insert
-        self._conn.execute("""
-            CREATE TABLE IF NOT EXISTS audit_log (
-                id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                booking_id  TEXT NOT NULL,
-                agency      TEXT NOT NULL DEFAULT '',
-                event       TEXT NOT NULL,
-                detail      TEXT NOT NULL DEFAULT '{}',
-                created_at  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        self._conn.execute(
-            "CREATE INDEX IF NOT EXISTS audit_log_booking_idx ON audit_log (booking_id)"
-        )
-        # Idempotency cache — exact response stored for 24 h
-        self._conn.execute("""
-            CREATE TABLE IF NOT EXISTS idempotency_keys (
-                idem_key    TEXT PRIMARY KEY,
-                tracking_id TEXT NOT NULL,
-                response    TEXT NOT NULL,
-                created_at  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _q(self, sql: str) -> str:
+        """Swap SQLite ? placeholders for PostgreSQL %s."""
+        return sql.replace("?", "%s") if self._pg else sql
+
+    def _execute(self, sql: str, params=()):
+        """Always call under self._lock."""
+        if self._pg:
+            cur = self._conn.cursor(cursor_factory=self._dict_cursor)
+        else:
+            cur = self._conn.cursor()
+        cur.execute(self._q(sql), params)
+        return cur
+
+    def _commit(self):
+        """Always call under self._lock."""
         self._conn.commit()
+
+    def _agency_filter(self) -> str:
+        """SQL expression: JSON field metadata.agency as text."""
+        if self._pg:
+            return "data::json->'metadata'->>'agency'"
+        return "json_extract(data, '$.metadata.agency')"
+
+    def _insert_or_ignore(self, table: str, cols: List[str]) -> str:
+        ph = ", ".join(["?"] * len(cols))
+        col_str = ", ".join(cols)
+        if self._pg:
+            return f"INSERT INTO {table} ({col_str}) VALUES ({ph}) ON CONFLICT DO NOTHING"
+        return f"INSERT OR IGNORE INTO {table} ({col_str}) VALUES ({ph})"
+
+    # ------------------------------------------------------------------
+    # Schema
+    # ------------------------------------------------------------------
+
+    def _init_schema(self):
+        audit_id = "SERIAL PRIMARY KEY" if self._pg else "INTEGER PRIMARY KEY AUTOINCREMENT"
+        with self._lock:
+            self._execute("""
+                CREATE TABLE IF NOT EXISTS bookings (
+                    booking_id  TEXT PRIMARY KEY,
+                    data        TEXT NOT NULL,
+                    active      INTEGER NOT NULL DEFAULT 1,
+                    created_at  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            self._execute(f"""
+                CREATE TABLE IF NOT EXISTS audit_log (
+                    id          {audit_id},
+                    booking_id  TEXT NOT NULL,
+                    agency      TEXT NOT NULL DEFAULT '',
+                    event       TEXT NOT NULL,
+                    detail      TEXT NOT NULL DEFAULT '{{}}',
+                    created_at  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            self._execute(
+                "CREATE INDEX IF NOT EXISTS audit_log_booking_idx ON audit_log (booking_id)"
+            )
+            self._execute("""
+                CREATE TABLE IF NOT EXISTS idempotency_keys (
+                    idem_key    TEXT PRIMARY KEY,
+                    tracking_id TEXT NOT NULL,
+                    response    TEXT NOT NULL,
+                    created_at  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            self._commit()
 
     # ------------------------------------------------------------------
     # Write — bookings
@@ -64,24 +114,24 @@ class BookingStore:
     def upsert(self, booking: Booking) -> None:
         data = json.dumps(self._to_dict(booking))
         with self._lock:
-            self._conn.execute(
+            self._execute(
                 """
                 INSERT INTO bookings (booking_id, data) VALUES (?, ?)
-                ON CONFLICT(booking_id) DO UPDATE SET
+                ON CONFLICT (booking_id) DO UPDATE SET
                     data       = excluded.data,
                     updated_at = CURRENT_TIMESTAMP
                 """,
                 (booking.booking_id, data),
             )
-            self._conn.commit()
+            self._commit()
 
     def deactivate(self, booking_id: str) -> None:
         with self._lock:
-            self._conn.execute(
+            self._execute(
                 "UPDATE bookings SET active = 0, updated_at = CURRENT_TIMESTAMP WHERE booking_id = ?",
                 (booking_id,),
             )
-            self._conn.commit()
+            self._commit()
 
     # ------------------------------------------------------------------
     # Read — bookings
@@ -89,27 +139,25 @@ class BookingStore:
 
     def get_active(self) -> List[Booking]:
         with self._lock:
-            rows = self._conn.execute(
-                "SELECT data FROM bookings WHERE active = 1"
-            ).fetchall()
+            rows = self._execute("SELECT data FROM bookings WHERE active = 1").fetchall()
         return [self._from_dict(json.loads(r[0])) for r in rows]
 
     def get_by_id(self, booking_id: str) -> Optional[Booking]:
         with self._lock:
-            row = self._conn.execute(
+            row = self._execute(
                 "SELECT data FROM bookings WHERE booking_id = ?",
                 (booking_id,),
             ).fetchone()
         return self._from_dict(json.loads(row[0])) if row else None
 
     def get_by_agency(self, agency: str) -> List[dict]:
-        """Returns raw rows (data + active + timestamps) for a given agency."""
+        af = self._agency_filter()
         with self._lock:
-            rows = self._conn.execute(
-                """
+            rows = self._execute(
+                f"""
                 SELECT data, active, created_at, updated_at
                 FROM bookings
-                WHERE json_extract(data, '$.metadata.agency') = ?
+                WHERE {af} = ?
                 ORDER BY created_at DESC
                 """,
                 (agency,),
@@ -118,56 +166,48 @@ class BookingStore:
         for row in rows:
             d = json.loads(row[0])
             d["_active"] = bool(row[1])
-            d["_created_at"] = row[2]
-            d["_updated_at"] = row[3]
+            d["_created_at"] = str(row[2])
+            d["_updated_at"] = str(row[3])
             result.append(d)
         return result
 
     def get_agency_savings(self, agency: str) -> float:
-        """Sum of savings from rebooking_outcomes for this agency's bookings."""
+        af = self._agency_filter()
         with self._lock:
             try:
-                row = self._conn.execute(
-                    """
+                row = self._execute(
+                    f"""
                     SELECT COALESCE(SUM(ro.savings), 0)
                     FROM rebooking_outcomes ro
                     JOIN bookings b ON b.booking_id = ro.booking_id
-                    WHERE json_extract(b.data, '$.metadata.agency') = ?
+                    WHERE {af} = ?
                     AND ro.success = 1
                     """,
                     (agency,),
                 ).fetchone()
                 return float(row[0]) if row else 0.0
             except Exception:
+                self._conn.rollback()
                 return 0.0
 
     # ------------------------------------------------------------------
     # Audit log
     # ------------------------------------------------------------------
 
-    def log_audit(
-        self,
-        booking_id: str,
-        agency: str,
-        event: str,
-        detail: dict,
-    ) -> None:
-        """Append one immutable record to the audit trail."""
+    def log_audit(self, booking_id: str, agency: str, event: str, detail: dict) -> None:
         with self._lock:
-            self._conn.execute(
+            self._execute(
                 "INSERT INTO audit_log (booking_id, agency, event, detail) VALUES (?, ?, ?, ?)",
                 (booking_id, agency, event, json.dumps(detail)),
             )
-            self._conn.commit()
+            self._commit()
 
     def get_audit(self, booking_id: str) -> List[dict]:
-        """Return the full ordered audit trail for a booking."""
         with self._lock:
-            rows = self._conn.execute(
+            rows = self._execute(
                 """
                 SELECT id, agency, event, detail, created_at
-                FROM audit_log
-                WHERE booking_id = ?
+                FROM audit_log WHERE booking_id = ?
                 ORDER BY id ASC
                 """,
                 (booking_id,),
@@ -178,7 +218,7 @@ class BookingStore:
                 "agency":    row[1],
                 "event":     row[2],
                 "detail":    json.loads(row[3]),
-                "timestamp": row[4],
+                "timestamp": str(row[4]),
             }
             for row in rows
         ]
@@ -189,7 +229,7 @@ class BookingStore:
 
     def get_idempotency(self, idem_key: str) -> Optional[dict]:
         with self._lock:
-            row = self._conn.execute(
+            row = self._execute(
                 "SELECT tracking_id, response FROM idempotency_keys WHERE idem_key = ?",
                 (idem_key,),
             ).fetchone()
@@ -198,12 +238,12 @@ class BookingStore:
         return None
 
     def set_idempotency(self, idem_key: str, tracking_id: str, response: dict) -> None:
+        sql = self._insert_or_ignore(
+            "idempotency_keys", ["idem_key", "tracking_id", "response"]
+        )
         with self._lock:
-            self._conn.execute(
-                "INSERT OR IGNORE INTO idempotency_keys (idem_key, tracking_id, response) VALUES (?, ?, ?)",
-                (idem_key, tracking_id, json.dumps(response)),
-            )
-            self._conn.commit()
+            self._execute(sql, (idem_key, tracking_id, json.dumps(response)))
+            self._commit()
 
     # ------------------------------------------------------------------
     # Serialization
