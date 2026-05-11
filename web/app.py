@@ -17,6 +17,7 @@ from ryde import events as ryde_events
 from ryde.live_market import get_market
 from ryde.models import Booking, Passenger
 from ryde.store import BookingStore
+from ryde.agency_store import AgencyStore
 from .admin import router as admin_router
 from .api_v1 import router as api_v1_router
 from .lemon import router as lemon_router
@@ -32,12 +33,13 @@ app.include_router(lemon_router)
 templates = Jinja2Templates(directory="web/templates")
 
 _db_path = os.getenv("RYDE_DB_PATH", "ryde.db")
-_clients = ClientStore(_db_path)
+_clients  = ClientStore(_db_path)
 _bookings = BookingStore(_db_path)
+_agencies = AgencyStore(_db_path)
 _stripe: Optional[StripeClient] = None
 
-_SUCCESS_FEE    = float(os.getenv("SUCCESS_FEE_PERCENT", "20")) / 100
-_BASE_URL       = os.getenv("BASE_URL", "http://localhost:8000")
+_SUCCESS_FEE     = float(os.getenv("SUCCESS_FEE_PERCENT", "20")) / 100
+_BASE_URL        = os.getenv("BASE_URL", "http://localhost:8000")
 _MARKET_INTERVAL = float(os.getenv("MARKET_TICK_SECONDS", "3"))
 
 
@@ -195,6 +197,7 @@ async def api_docs(request: Request):
 @app.get("/pricing", response_class=HTMLResponse)
 async def pricing(request: Request):
     return templates.TemplateResponse(request, "pricing.html", {
+        "free_url":    os.getenv("LS_FREE_URL", "/signup"),
         "starter_url": os.getenv("LS_STARTER_URL", ""),
         "pro_url":     os.getenv("LS_PRO_URL", ""),
     })
@@ -202,6 +205,45 @@ async def pricing(request: Request):
 @app.get("/welcome", response_class=HTMLResponse)
 async def welcome(request: Request):
     return templates.TemplateResponse(request, "welcome.html")
+
+
+# ---------------------------------------------------------------------------
+# Free-tier self-serve signup
+# ---------------------------------------------------------------------------
+
+@app.get("/signup", response_class=HTMLResponse)
+async def signup_form(request: Request):
+    return templates.TemplateResponse(request, "signup.html", {"error": ""})
+
+
+@app.post("/signup", response_class=HTMLResponse)
+async def signup_submit(
+    request: Request,
+    name: str  = Form(...),
+    email: str = Form(...),
+):
+    name  = name.strip()
+    email = email.strip().lower()
+    if not name or not email or "@" not in email:
+        return templates.TemplateResponse(request, "signup.html", {
+            "error": "Please enter a valid agency name and email address."
+        }, status_code=422)
+    try:
+        agency = _agencies.create_agency(name=name, email=email, environment="test")
+    except Exception as exc:
+        log.error("Free signup failed", extra={"email": email, "error": str(exc)})
+        return templates.TemplateResponse(request, "signup.html", {
+            "error": "Something went wrong. Please try again or email api@ryde.io."
+        }, status_code=500)
+    return templates.TemplateResponse(request, "free_key.html", {
+        "agency_name": agency.name,
+        "api_key":     agency.api_key,
+    })
+
+
+# ---------------------------------------------------------------------------
+# B2C consumer registration flow
+# ---------------------------------------------------------------------------
 
 @app.get("/register", response_class=HTMLResponse)
 async def register_form(request: Request):
@@ -291,7 +333,7 @@ async def dashboard(request: Request, client_id: str):
 @app.post("/webhook/ryde")
 async def ryde_webhook(request: Request):
     payload = await request.json()
-    event = payload.get("event")
+    event      = payload.get("event")
     booking_id = payload.get("booking_id")
     if event == "ryde.rebooking" and payload.get("success"):
         savings = float(payload.get("savings_realized", 0))
