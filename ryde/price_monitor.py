@@ -1,59 +1,88 @@
-import logging
-from datetime import datetime
-from typing import Optional
+"""
+PriceMonitor — Signal API model (time-decay only).
 
-from apscheduler.schedulers.background import BackgroundScheduler
-from apscheduler.triggers.interval import IntervalTrigger
+IMPORTANT: In the Signal API architecture, agencies PUSH price updates via
+the B2B API endpoints (POST /monitor, PATCH /bookings/{id}).  We do NOT poll
+external airline APIs (Duffel / Amadeus).
+
+The PriceMonitor's only job here is to provide a clean start/stop lifecycle
+wrapper that the lifespan context manager in app.py can control.  The actual
+PRISM time-decay re-evaluations run in the async _prism_background_scan()
+coroutine (api_v1.scan_all_active), which respects per-booking cadence:
+
+    >= 14 days to departure  →  re-evaluate every 60 min
+     7–14 days to departure  →  re-evaluate every 30 min
+      < 7 days to departure  →  re-evaluate every 15 min
+
+The background scanner (app.py) polls every PRISM_SCAN_INTERVAL_SECONDS
+(default 15 min) and scan_all_active() skips bookings that are not yet due
+for their cadence tier.
+"""
+import logging
+import threading
+
+from .store import BookingStore
 
 log = logging.getLogger(__name__)
 
 
 class PriceMonitor:
     """
-    Background scheduler that drives the bot's polling loop.
+    Lightweight lifecycle manager for the Signal API time-decay scanner.
 
-    Default interval: 60 minutes.
-    The first poll fires immediately on start() so you get instant feedback.
+    No external API calls are made here.  This class exists solely so that
+    the lifespan context manager has a clear start() / stop() interface and
+    can log scanner state for the /health endpoint.
 
-    Scheduling strategy:
-      - Most routes: 60-minute interval is sufficient.
-      - Hot routes (high volatility_index): reduce to 15-30 minutes.
-      - Under 14 days to departure: increase to every 15 minutes
-        (last-minute inventory changes fast).
-
-    In production, replace APScheduler with Celery Beat + Redis
-    for distributed, crash-resilient scheduling.
+    Parameters
+    ----------
+    store : BookingStore
+        Read-only reference used only for logging active-booking counts.
+    scan_interval : int
+        Interval in seconds between background scans (default 900 = 15 min).
+        Stored for health-check reporting; actual cadence is enforced in
+        api_v1.scan_all_active().
     """
 
-    def __init__(self, bot, interval_minutes: int = 60):
-        self.bot = bot
-        self.interval = interval_minutes
-        self._scheduler = BackgroundScheduler()
+    def __init__(self, store: BookingStore, scan_interval: int = 900) -> None:
+        self.store = store
+        self.scan_interval = scan_interval
+        self._running = False
+        self._thread: threading.Thread | None = None
 
-    def start(self):
-        self._scheduler.add_job(
-            self._poll_all,
-            trigger=IntervalTrigger(minutes=self.interval),
-            id="ryde_poll",
-            replace_existing=True,
-            next_run_time=datetime.now(),  # fire immediately
-        )
-        self._scheduler.start()
-        log.info("RYDE PriceMonitor started — polling every %d min.", self.interval)
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
 
-    def stop(self):
-        self._scheduler.shutdown(wait=False)
-        log.info("RYDE PriceMonitor stopped.")
-
-    def _poll_all(self):
-        bookings = self.bot.store.get_active()
-        if not bookings:
-            log.debug("No active bookings to poll.")
+    def start(self) -> None:
+        """Mark the monitor as active and log startup state."""
+        if self._running:
+            log.warning("PriceMonitor.start() called but monitor is already running.")
             return
+        self._running = True
+        active_count = 0
+        try:
+            active_count = len(self.store.get_active())
+        except Exception:
+            pass
+        log.info(
+            "PriceMonitor started (Signal API mode) — scan_interval=%ds, "
+            "active_bookings=%d. Time-decay evaluations via async background task.",
+            self.scan_interval,
+            active_count,
+        )
 
-        log.info("Polling %d booking(s)...", len(bookings))
-        for booking in bookings:
-            try:
-                self.bot.process(booking)
-            except Exception as exc:
-                log.error("Unhandled error [%s]: %s", booking.booking_id, exc)
+    def stop(self) -> None:
+        """Signal shutdown."""
+        if not self._running:
+            return
+        self._running = False
+        log.info("PriceMonitor stopped.")
+
+    # ------------------------------------------------------------------
+    # Status helpers
+    # ------------------------------------------------------------------
+
+    @property
+    def is_running(self) -> bool:
+        return self._running

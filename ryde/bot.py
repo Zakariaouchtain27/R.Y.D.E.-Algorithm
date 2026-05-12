@@ -1,10 +1,24 @@
+"""
+RYDEBot — Signal API orchestrator.
+
+In the Signal API model, agencies push price updates via the B2B API.
+RYDEBot no longer requires or calls external adapters (Duffel / Amadeus).
+
+process() is kept for compatibility with any legacy B2C paths but the
+primary evaluation pipeline runs through api_v1._run_prism_sync() which
+calls PRISMEngine.evaluate() directly with agency-supplied prices.
+
+Hold cycle logic:
+    STRIKE       → escalate to decision webhook  (no rebook in Signal mode)
+    PHANTOM_HOLD → maintain hold state, do NOT rebook, keep watching
+    WAIT / IGNORE → release hold if price moved unfavorably
+"""
 import logging
 from datetime import datetime
 from typing import Dict, Optional
 
 from . import events
-from .adapters.base import BaseAdapter
-from .models import Booking, PriceSnapshot, RYDEAction, RYDEDecision, RebookingResult
+from .models import Booking, PriceSnapshot, RYDEAction, RYDEDecision
 from .notifier import Notifier
 from .phantom_hold import PhantomHoldManager
 from .prism import PRISMEngine
@@ -16,24 +30,23 @@ log = logging.getLogger(__name__)
 
 class RYDEBot:
     """
-    Orchestrator: PRISM engine + adapters + hold manager + store + notifier.
+    Orchestrator: PRISM engine + hold manager + store + notifier.
+
+    Signal API model: no external adapters are used.  Price updates arrive
+    via agency webhooks (PATCH /api/v1/bookings/{id}) and PRISM decisions
+    are returned to the agency via their registered webhook_url.
 
     Usage:
-        bot = RYDEBot(adapters={"duffel": DuffelAdapter(key)})
+        bot = RYDEBot(db_path="ryde.db")
         bot.register(booking)
-        # PriceMonitor calls bot.process(booking) on schedule
+        # PRISMEngine is invoked by api_v1._run_prism_sync on each price push
     """
 
-    def __init__(
-        self,
-        adapters: Dict[str, BaseAdapter],
-        db_path: str = "ryde.db",
-    ):
-        self.adapters = adapters
-        self.engine = PRISMEngine(db_path=db_path)
-        self.holds = PhantomHoldManager()
+    def __init__(self, db_path: str = "ryde.db") -> None:
+        self.engine   = PRISMEngine(db_path=db_path)
+        self.holds    = PhantomHoldManager()
         self.notifier = Notifier()
-        self.store = BookingStore(db_path)
+        self.store    = BookingStore(db_path)
         self._history = PriceHistory(db_path)
         self._last_prices: Dict[str, float] = {}
 
@@ -41,31 +54,30 @@ class RYDEBot:
     # Public API
     # ------------------------------------------------------------------
 
-    def register(self, booking: Booking):
+    def register(self, booking: Booking) -> None:
         """Add a booking to the monitoring queue."""
         self.store.upsert(booking)
-        log.info("Registered %s for monitoring.", booking.booking_id)
+        log.info("Registered %s for PRISM monitoring.", booking.booking_id)
 
-    def process(self, booking: Booking, n_competitors_dropped: int = 0):
+    def process(self, booking: Booking, snapshot: Optional[PriceSnapshot] = None) -> Optional[RYDEDecision]:
         """
         Single evaluation cycle for one booking.
-        Called by PriceMonitor on every poll tick.
+
+        In Signal API mode, snapshot must be provided (agency-supplied price).
+        Returns None if the booking is on hold and no escalation occurs.
         """
-        adapter = self._get_adapter(booking)
-        if adapter is None:
-            return
+        if snapshot is None:
+            log.warning(
+                "%s: process() called without snapshot (Signal API mode). "
+                "Use api_v1._run_prism_sync for agency-pushed prices.",
+                booking.booking_id,
+            )
+            return None
 
         if self.holds.is_active(booking.booking_id):
-            self._handle_hold_cycle(booking, adapter, n_competitors_dropped)
-            return
+            return self._handle_hold_cycle(booking, snapshot)
 
-        snapshot = self._fetch_price(booking, adapter)
-        if snapshot is None:
-            return
-
-        decision = self.engine.evaluate(
-            booking, snapshot, n_competitors_dropped=n_competitors_dropped
-        )
+        decision = self.engine.evaluate(booking, snapshot)
         log.info(
             "%s → %s (score=%.1f, savings=$%.2f)",
             booking.booking_id, decision.action,
@@ -75,20 +87,21 @@ class RYDEBot:
         self.notifier.decision(booking, decision)
 
         if decision.action == RYDEAction.STRIKE:
-            self._execute_rebooking(booking, snapshot, adapter)
+            # Signal API: notify agency to act — do not self-rebook
+            log.info(
+                "%s: STRIKE decision — webhook fired. Agency must execute rebook.",
+                booking.booking_id,
+            )
         elif decision.action == RYDEAction.PHANTOM_HOLD:
-            hold_ref = None
-            try:
-                hold_ref = adapter.create_hold(booking, snapshot.fare_id)
-            except Exception:
-                log.warning("%s: API hold unsupported, using soft hold.", booking.booking_id)
             self.holds.create(
                 booking.booking_id,
                 snapshot.fare_id,
                 snapshot.current_price,
-                hold_ref,
+                hold_ref=None,  # no external hold in Signal API mode
             )
-            log.info("%s: Phantom hold created (ref: %s).", booking.booking_id, hold_ref)
+            log.info("%s: Phantom hold created.", booking.booking_id)
+
+        return decision
 
     # ------------------------------------------------------------------
     # Internal
@@ -123,99 +136,38 @@ class RYDEBot:
     def _handle_hold_cycle(
         self,
         booking: Booking,
-        adapter: BaseAdapter,
-        n_competitors_dropped: int,
-    ):
+        snapshot: PriceSnapshot,
+    ) -> Optional[RYDEDecision]:
+        """
+        Re-evaluate a booking that is currently on phantom hold.
+
+        Decision matrix:
+          STRIKE       → notify agency (webhook); release hold
+          PHANTOM_HOLD → maintain hold state; do NOT trigger a rebook
+          WAIT / IGNORE → release hold (price moved unfavorably)
+        """
         hold = self.holds.get(booking.booking_id)
         if hold is None:
-            return
+            return None
 
         log.info("%s: On phantom hold until %s.", booking.booking_id, hold.expires_at)
-        snapshot = self._fetch_price(booking, adapter)
-        if snapshot is None:
-            return
-
-        decision = self.engine.evaluate(
-            booking, snapshot, n_competitors_dropped=n_competitors_dropped
-        )
+        decision = self.engine.evaluate(booking, snapshot)
         self._emit_price_event(booking, snapshot, decision)
 
-        # Only STRIKE escalates to rebooking; PHANTOM_HOLD keeps the clock
-        # ticking; WAIT/IGNORE releases the hold (price moved unfavorably).
         if decision.action == RYDEAction.STRIKE:
-            self._execute_rebooking(booking, snapshot, adapter)
+            # Notify agency — do not self-rebook in Signal API mode
+            self.notifier.decision(booking, decision)
+            self.holds.release(booking.booking_id)
+            log.info(
+                "%s: STRIKE during hold — agency notified; hold released.",
+                booking.booking_id,
+            )
         elif decision.action == RYDEAction.PHANTOM_HOLD:
-            log.info("%s: Market stable. Continuing phantom hold.", booking.booking_id)
+            # Hold remains active — market stable, keep watching
+            log.info("%s: Market stable. Maintaining phantom hold.", booking.booking_id)
         else:
+            # WAIT / IGNORE — conditions worsened; release hold
             self.holds.release(booking.booking_id)
             log.info("%s: Hold released — price moved unfavorably.", booking.booking_id)
 
-    def _execute_rebooking(
-        self,
-        booking: Booking,
-        snapshot: PriceSnapshot,
-        adapter: BaseAdapter,
-    ) -> RebookingResult:
-        result = RebookingResult(
-            booking_id=booking.booking_id,
-            success=False,
-            old_ref=booking.adapter_booking_ref,
-            new_ref=None,
-            savings_realized=0.0,
-            timestamp=datetime.now(),
-        )
-        try:
-            if not adapter.cancel_booking(booking):
-                raise RuntimeError("Cancellation returned False.")
-
-            new_ref = adapter.create_booking(booking, snapshot.fare_id)
-            result.success = True
-            result.new_ref = new_ref
-            result.savings_realized = round(
-                booking.original_price - snapshot.current_price - booking.cancellation_fee, 2
-            )
-
-            route_key = make_route_key(
-                booking.origin,
-                booking.destination,
-                booking.departure_date.strftime("%Y-%m-%d"),
-            )
-            self._history.record_outcome(
-                booking_id=booking.booking_id,
-                route_key=route_key,
-                original_price=booking.original_price,
-                rebooked_price=snapshot.current_price,
-                savings=result.savings_realized,
-                success=True,
-            )
-
-            booking.adapter_booking_ref = new_ref
-            booking.original_price = snapshot.current_price
-            self.store.upsert(booking)
-            self.holds.release(booking.booking_id)
-
-            log.info(
-                "REBOOKING SUCCESS %s → %s  saved=$%.2f",
-                result.old_ref, new_ref, result.savings_realized,
-            )
-        except Exception as exc:
-            result.error = str(exc)
-            log.error("REBOOKING FAILED %s: %s", booking.booking_id, exc)
-
-        self.notifier.rebooking(booking, result)
-        return result
-
-    def _fetch_price(
-        self, booking: Booking, adapter: BaseAdapter
-    ) -> Optional[PriceSnapshot]:
-        try:
-            return adapter.get_current_price(booking)
-        except Exception as exc:
-            log.error("Price fetch failed [%s]: %s", booking.booking_id, exc)
-            return None
-
-    def _get_adapter(self, booking: Booking) -> Optional[BaseAdapter]:
-        adapter = self.adapters.get(booking.adapter)
-        if adapter is None:
-            log.error("No adapter registered for '%s'.", booking.adapter)
-        return adapter
+        return decision

@@ -21,6 +21,7 @@ Decision framework:
         (lock current fare as safety net while cascade plays out)
 """
 
+import gc
 import logging
 import math
 from datetime import datetime
@@ -185,6 +186,13 @@ class PRISMEngine:
         prob_further_drop = round(
             float((paths.min(axis=1) < snapshot.current_price).mean() * 100), 1
         )
+
+        # ── RAM guardrail ────────────────────────────────────────────────────
+        # Free the (n_paths × days) array immediately — high-volume evaluations
+        # on Railway's constrained container can otherwise cause OOM spikes.
+        del paths
+        gc.collect()
+        # ─────────────────────────────────────────────────────────────────────
 
         reasoning = (
             f"LSMC E[value]=${expected_value:.2f} | intrinsic=${net_savings:.2f} | "

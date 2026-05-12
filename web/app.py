@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 import uuid
+from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Set
@@ -16,6 +17,7 @@ setup_logging(os.getenv("LOG_LEVEL", "INFO"))
 from ryde import events as ryde_events
 from ryde.live_market import get_market
 from ryde.models import Booking, Passenger
+from ryde.price_monitor import PriceMonitor
 from ryde.store import BookingStore
 from ryde.agency_store import AgencyStore
 from .admin import router as admin_router
@@ -26,11 +28,8 @@ from .stripe_client import StripeClient
 
 log = logging.getLogger(__name__)
 
-app = FastAPI(title="RYDE")
-app.include_router(api_v1_router)
-app.include_router(admin_router)
-app.include_router(lemon_router)
-templates = Jinja2Templates(directory="web/templates")
+# The app is wired with lifespan=_lifespan so that startup/shutdown
+# run correctly on Railway. Routers are attached after the lifespan is defined.
 
 _db_path  = os.getenv("RYDE_DB_PATH", "ryde.db")
 _clients  = ClientStore(_db_path)
@@ -40,7 +39,11 @@ _stripe: Optional[StripeClient] = None
 
 _BASE_URL        = os.getenv("BASE_URL", "http://localhost:8000")
 _MARKET_INTERVAL = float(os.getenv("MARKET_TICK_SECONDS", "3"))
-_SCAN_INTERVAL   = int(os.getenv("PRISM_SCAN_INTERVAL_SECONDS", "900"))  # 15 min
+_SCAN_INTERVAL   = int(os.getenv("PRISM_SCAN_INTERVAL_SECONDS", "900"))  # 15 min default
+
+# Signal API model — PriceMonitor drives time-decay re-evaluations only.
+# No external adapter polling. Instantiated during lifespan.
+_price_monitor: Optional[PriceMonitor] = None
 
 
 def _get_stripe() -> StripeClient:
@@ -109,26 +112,33 @@ def _on_ryde_event(event: dict) -> None:
 
 async def _prism_background_scan() -> None:
     """
+    Signal API time-decay scanner — no external API calls.
     Runs every PRISM_SCAN_INTERVAL_SECONDS (default 15 min).
     Per-booking cadence inside scan_all_active() based on days_to_departure:
       >= 14 days  →  every 60 min
        7–14 days  →  every 30 min
         < 7 days  →  every 15 min
+    Bookings evaluated too recently for their cadence tier are skipped.
     """
-    await asyncio.sleep(60)
+    await asyncio.sleep(60)   # warm-up: let the server fully start first
     while True:
         try:
             count = await scan_all_active()
             if count:
                 log.info("PRISM background scan: %d booking(s) evaluated", count)
+            else:
+                log.debug("PRISM background scan: no bookings due for evaluation")
         except Exception as exc:
-            log.error("PRISM background scan failed: %s", exc)
+            log.error("PRISM background scan failed: %s", exc, exc_info=True)
         await asyncio.sleep(_SCAN_INTERVAL)
 
 
-@app.on_event("startup")
-async def _startup() -> None:
-    global _loop, _market_task, _scan_task
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    """FastAPI lifespan — replaces deprecated @on_event startup/shutdown hooks."""
+    global _loop, _market_task, _scan_task, _price_monitor
+
+    # ── Startup ────────────────────────────────────────────────────────────
     Path(_db_path).parent.mkdir(parents=True, exist_ok=True)
 
     db_url = os.getenv("DATABASE_URL", "")
@@ -140,27 +150,62 @@ async def _startup() -> None:
                 break
             except Exception as exc:
                 if attempt == 9:
-                    log.error("PostgreSQL not reachable after 10 attempts: %s", exc)
+                    log.error(
+                        "PostgreSQL not reachable after 10 attempts: %s", exc,
+                        exc_info=True,
+                    )
                     raise
                 wait = 2 ** attempt
-                log.warning("PostgreSQL not ready (attempt %d), retrying in %ds", attempt + 1, wait)
+                log.warning(
+                    "PostgreSQL not ready (attempt %d/10), retrying in %ds",
+                    attempt + 1, wait,
+                )
                 await asyncio.sleep(wait)
 
-    log.info("RYDE startup complete", extra={"db": "postgres" if db_url else "sqlite"})
+    # Signal API model: PriceMonitor re-evaluates stored prices only.
+    # No DuffelAdapter / AmadeusAdapter required.
+    _price_monitor = PriceMonitor(store=_bookings, scan_interval=_SCAN_INTERVAL)
+    _price_monitor.start()
+
     _loop        = asyncio.get_running_loop()
     ryde_events.subscribe(_on_ryde_event)
     _market_task = asyncio.create_task(get_market().run(interval=_MARKET_INTERVAL))
     _scan_task   = asyncio.create_task(_prism_background_scan())
 
+    log.info(
+        "RYDE startup complete",
+        extra={"db": "postgres" if db_url else "sqlite", "scan_interval_s": _SCAN_INTERVAL},
+    )
 
-@app.on_event("shutdown")
-async def _shutdown() -> None:
+    yield  # ── Server is running ──────────────────────────────────────────
+
+    # ── Shutdown ───────────────────────────────────────────────────────────
+    log.info("RYDE shutting down…")
+    if _price_monitor is not None:
+        _price_monitor.stop()
     ryde_events.unsubscribe(_on_ryde_event)
     get_market().stop()
     if _market_task is not None:
         _market_task.cancel()
+        try:
+            await _market_task
+        except asyncio.CancelledError:
+            pass
     if _scan_task is not None:
         _scan_task.cancel()
+        try:
+            await _scan_task
+        except asyncio.CancelledError:
+            pass
+    log.info("RYDE shutdown complete.")
+
+# Wire the lifespan into the app after it's defined
+app = FastAPI(title="RYDE", lifespan=_lifespan)
+app.include_router(api_v1_router)
+app.include_router(admin_router)
+app.include_router(lemon_router)
+template_dir = os.getenv("RYDE_TEMPLATE_DIR", "web/templates")
+templates = Jinja2Templates(directory=template_dir)
 
 
 # ---------------------------------------------------------------------------
