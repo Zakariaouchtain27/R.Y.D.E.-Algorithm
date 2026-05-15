@@ -1,0 +1,222 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>PRISM TERMINAL — Live</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <style>
+    :root {
+      --bg: #0a0e14;
+      --panel: #0f141c;
+      --row: #121822;
+      --row-alt: #0d121a;
+      --border: #1c2433;
+      --text: #d6e2f0;
+      --muted: #6b7a8f;
+      --green: #00ff8b;
+      --red: #ff4d6d;
+      --amber: #ffb000;
+      --blue: #4ea8ff;
+      --mono: 'SF Mono', 'JetBrains Mono', Menlo, Consolas, monospace;
+    }
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0; padding: 0; height: 100%;
+      background: var(--bg); color: var(--text);
+      font-family: var(--mono); font-size: 13px;
+    }
+    header {
+      display: flex; justify-content: space-between; align-items: center;
+      padding: 10px 18px;
+      border-bottom: 1px solid var(--border);
+      background: var(--panel);
+    }
+    header .title { letter-spacing: 2px; font-weight: 700; color: var(--amber); }
+    header .title small { color: var(--muted); margin-left: 12px; font-weight: 400; letter-spacing: 1px; }
+    header .status { display: flex; align-items: center; gap: 14px; color: var(--muted); }
+    .pulse {
+      width: 9px; height: 9px; border-radius: 50%;
+      background: var(--red); box-shadow: 0 0 8px var(--red);
+      transition: background .2s, box-shadow .2s;
+    }
+    .pulse.live { background: var(--green); box-shadow: 0 0 10px var(--green); }
+    .stats {
+      display: grid; grid-template-columns: repeat(4, 1fr);
+      gap: 1px; background: var(--border);
+      border-bottom: 1px solid var(--border);
+    }
+    .stat { background: var(--panel); padding: 12px 18px; }
+    .stat .label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 1.5px; }
+    .stat .value { font-size: 22px; font-weight: 600; margin-top: 4px; }
+    .stat .value.up { color: var(--green); }
+    .stat .value.down { color: var(--red); }
+    .ticker-wrap { padding: 18px; }
+    table { width: 100%; border-collapse: collapse; }
+    thead th {
+      text-align: left; padding: 10px 12px;
+      color: var(--muted); font-weight: 500; font-size: 11px;
+      text-transform: uppercase; letter-spacing: 1.5px;
+      border-bottom: 1px solid var(--border);
+      background: var(--panel);
+      position: sticky; top: 0;
+    }
+    tbody td { padding: 10px 12px; border-bottom: 1px solid var(--border); }
+    tbody tr { background: var(--row); transition: background-color 1.2s ease; }
+    tbody tr:nth-child(even) { background: var(--row-alt); }
+    tbody tr.flash-up   { background: rgba(0, 255, 139, 0.18); }
+    tbody tr.flash-down { background: rgba(255, 77, 109, 0.18); }
+    .delta.up   { color: var(--green); }
+    .delta.down { color: var(--red); }
+    .delta.flat { color: var(--muted); }
+    .badge {
+      display: inline-block; padding: 3px 10px; border-radius: 3px;
+      font-size: 11px; font-weight: 700; letter-spacing: 1px;
+    }
+    .badge.STRIKE       { background: var(--green); color: #001a0d; }
+    .badge.PHANTOM_HOLD { background: var(--amber); color: #1a1100; }
+    .badge.WAIT         { background: var(--blue);  color: #001428; }
+    .badge.IGNORE       { background: #2a3245;      color: var(--muted); }
+    .empty {
+      text-align: center; color: var(--muted); padding: 60px 20px;
+      font-style: italic;
+    }
+    .ts { color: var(--muted); font-size: 11px; }
+    .route { color: var(--amber); font-weight: 600; letter-spacing: 1px; }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="title">PRISM TERMINAL <small>LIVE &mdash; Longstaff-Schwartz Optimal Stopping</small></div>
+    <div class="status">
+      <span id="clock"></span>
+      <span id="connStatus">DISCONNECTED</span>
+      <span class="pulse" id="pulse"></span>
+    </div>
+  </header>
+
+  <section class="stats">
+    <div class="stat"><div class="label">Events</div><div class="value" id="statEvents">0</div></div>
+    <div class="stat"><div class="label">Active Routes</div><div class="value" id="statRoutes">0</div></div>
+    <div class="stat"><div class="label">Strikes</div><div class="value up" id="statStrikes">0</div></div>
+    <div class="stat"><div class="label">Last Move</div><div class="value" id="statLastMove">&mdash;</div></div>
+  </section>
+
+  <main class="ticker-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th style="width: 90px">TIME</th>
+          <th style="width: 110px">ROUTE</th>
+          <th style="width: 90px">OLD</th>
+          <th style="width: 90px">NEW</th>
+          <th style="width: 90px">&Delta;</th>
+          <th style="width: 130px">ACTION</th>
+          <th style="width: 70px">SCORE</th>
+          <th style="width: 100px">SAVINGS</th>
+          <th>BOOKING</th>
+        </tr>
+      </thead>
+      <tbody id="tickerBody">
+        <tr id="emptyRow"><td colspan="9" class="empty">Awaiting market data&hellip;</td></tr>
+      </tbody>
+    </table>
+  </main>
+
+  <script>
+    const tickerBody  = document.getElementById('tickerBody');
+    const emptyRow    = document.getElementById('emptyRow');
+    const pulse       = document.getElementById('pulse');
+    const connStatus  = document.getElementById('connStatus');
+    const statEvents  = document.getElementById('statEvents');
+    const statRoutes  = document.getElementById('statRoutes');
+    const statStrikes = document.getElementById('statStrikes');
+    const statLastMove= document.getElementById('statLastMove');
+    const clockEl     = document.getElementById('clock');
+
+    const seenRoutes = new Set();
+    let eventCount = 0;
+    let strikeCount = 0;
+    const MAX_ROWS = 200;
+
+    setInterval(() => {
+      const d = new Date();
+      clockEl.textContent = d.toUTCString().split(' ').slice(4, 5)[0] + ' UTC';
+    }, 1000);
+
+    function fmtTime(iso) {
+      try { return new Date(iso).toUTCString().split(' ').slice(4, 5)[0]; }
+      catch { return '&mdash;'; }
+    }
+    function fmtPrice(p) {
+      return (p === null || p === undefined) ? '&mdash;' : '$' + Number(p).toFixed(2);
+    }
+
+    function render(evt) {
+      if (emptyRow) emptyRow.remove();
+
+      const oldP = evt.old_price;
+      const newP = evt.new_price;
+      const delta = (oldP === null || oldP === undefined) ? 0 : (newP - oldP);
+      const dir = delta < 0 ? 'down' : delta > 0 ? 'up' : 'flat';
+      const flashClass = delta < 0 ? 'flash-up' : delta > 0 ? 'flash-down' : '';
+      const sign = delta > 0 ? '+' : '';
+
+      const tr = document.createElement('tr');
+      if (flashClass) tr.classList.add(flashClass);
+      tr.innerHTML = `
+        <td class="ts">${fmtTime(evt.timestamp)}</td>
+        <td class="route">${evt.route}</td>
+        <td>${fmtPrice(oldP)}</td>
+        <td>${fmtPrice(newP)}</td>
+        <td class="delta ${dir}">${oldP === null ? '&mdash;' : sign + delta.toFixed(2)}</td>
+        <td><span class="badge ${evt.action}">${evt.action}</span></td>
+        <td>${evt.score.toFixed(1)}</td>
+        <td class="delta ${evt.savings > 0 ? 'up' : 'flat'}">${fmtPrice(evt.savings)}</td>
+        <td class="ts">${evt.booking_id}</td>
+      `;
+      tickerBody.prepend(tr);
+
+      while (tickerBody.children.length > MAX_ROWS) {
+        tickerBody.removeChild(tickerBody.lastChild);
+      }
+
+      setTimeout(() => tr.classList.remove('flash-up', 'flash-down'), 1500);
+
+      eventCount += 1;
+      if (evt.action === 'STRIKE') strikeCount += 1;
+      seenRoutes.add(evt.route);
+      statEvents.textContent  = eventCount;
+      statRoutes.textContent  = seenRoutes.size;
+      statStrikes.textContent = strikeCount;
+      if (oldP !== null && oldP !== undefined) {
+        statLastMove.textContent = (delta > 0 ? '+' : '') + delta.toFixed(2);
+        statLastMove.className = 'value ' + (delta < 0 ? 'up' : delta > 0 ? 'down' : '');
+      }
+    }
+
+    let ws;
+    function connect() {
+      const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+      ws = new WebSocket(`${proto}//${location.host}/ws/ticker`);
+
+      ws.onopen = () => {
+        connStatus.textContent = 'LIVE';
+        pulse.classList.add('live');
+      };
+      ws.onclose = () => {
+        connStatus.textContent = 'RECONNECTING&hellip;';
+        pulse.classList.remove('live');
+        setTimeout(connect, 2000);
+      };
+      ws.onerror = () => ws.close();
+      ws.onmessage = (e) => {
+        let msg;
+        try { msg = JSON.parse(e.data); } catch { return; }
+        if (msg.type === 'hello') return;
+        if (msg.route && msg.action) render(msg);
+      };
+    }
+    connect();
+  </script>
+</body>
+</html>
