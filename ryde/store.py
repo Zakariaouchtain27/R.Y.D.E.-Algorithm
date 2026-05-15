@@ -32,8 +32,8 @@ class BookingStore:
             self._dict_cursor = psycopg2.extras.DictCursor
             # Connection deferred to first _execute call.  Connecting at
             # import time would block the whole Python process for up to the
-            # OS TCP timeout (~120s) if PostgreSQL isn’t ready yet, which
-            # prevents Railway’s healthcheck from ever getting a response.
+            # OS TCP timeout (~120s) if PostgreSQL isn't ready yet, which
+            # prevents Railway's healthcheck from ever getting a response.
         else:
             Path(db_path).parent.mkdir(parents=True, exist_ok=True)
             self._conn = sqlite3.connect(db_path, check_same_thread=False)
@@ -54,7 +54,7 @@ class BookingStore:
         self._conn = psycopg2.connect(_DATABASE_URL)
         self._conn.autocommit = False
         # Set _ready before calling _init_schema so that _execute calls
-        # inside _init_schema don’t recurse back into this method.
+        # inside _init_schema don't recurse back into this method.
         self._ready = True
         self._init_schema()
 
@@ -243,6 +243,31 @@ class BookingStore:
             }
             for row in rows
         ]
+
+    def get_last_decision_by_agency(self, agency: str) -> dict:
+        """
+        Returns {booking_id: decision_detail_dict} for the most recent
+        PRISM 'decision' audit event per booking owned by the agency.
+
+        Single-pass scan ordered newest-first; keeps the first (latest)
+        entry seen per booking_id to avoid an N+1 per-booking pattern.
+        """
+        with self._lock:
+            rows = self._execute(
+                """
+                SELECT booking_id, detail
+                FROM audit_log
+                WHERE event = 'decision' AND agency = ?
+                ORDER BY id DESC
+                """,
+                (agency,),
+            ).fetchall()
+        seen: dict = {}
+        for row in rows:
+            bid = row[0]
+            if bid not in seen:
+                seen[bid] = json.loads(row[1])
+        return seen
 
     # ------------------------------------------------------------------
     # Idempotency cache

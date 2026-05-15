@@ -7,7 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional, Set
 
-from fastapi import FastAPI, Form, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Form, Header, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
@@ -18,6 +18,7 @@ from ryde import events as ryde_events
 from ryde.live_market import get_market
 from ryde.models import Booking, Passenger
 from ryde.price_monitor import PriceMonitor
+from ryde.prism.price_history import PriceHistory
 from ryde.store import BookingStore
 from ryde.agency_store import AgencyStore
 from .admin import router as admin_router
@@ -28,10 +29,11 @@ from .stripe_client import StripeClient
 
 log = logging.getLogger(__name__)
 
-_db_path  = os.getenv("RYDE_DB_PATH", "ryde.db")
-_clients  = ClientStore(_db_path)
-_bookings = BookingStore(_db_path)
-_agencies = AgencyStore(_db_path)
+_db_path       = os.getenv("RYDE_DB_PATH", "ryde.db")
+_clients       = ClientStore(_db_path)
+_bookings      = BookingStore(_db_path)
+_agencies      = AgencyStore(_db_path)
+_price_history = PriceHistory(_db_path)
 _stripe: Optional[StripeClient] = None
 
 _BASE_URL        = os.getenv("BASE_URL", "http://localhost:8000")
@@ -234,7 +236,7 @@ async def ws_ticker(ws: WebSocket):
 
 
 # ---------------------------------------------------------------------------
-# Pages
+# Public pages
 # ---------------------------------------------------------------------------
 
 @app.get("/", response_class=HTMLResponse)
@@ -262,6 +264,107 @@ async def pricing(request: Request):
 @app.get("/welcome", response_class=HTMLResponse)
 async def welcome(request: Request):
     return templates.TemplateResponse(request, "welcome.html")
+
+
+# ---------------------------------------------------------------------------
+# Agency Dashboard
+# ---------------------------------------------------------------------------
+
+def _require_agency_key(
+    x_agency_key: Optional[str],
+    x_api_key: Optional[str],
+):
+    """Shared auth helper for dashboard JSON endpoints."""
+    key = x_agency_key or x_api_key
+    if not key:
+        raise HTTPException(status_code=401, detail="Missing X-Agency-Key header.")
+    agency_obj = _agencies.get_by_key(key)
+    if not agency_obj:
+        raise HTTPException(status_code=403, detail="Invalid or revoked API key.")
+    return agency_obj
+
+
+@app.get("/agency-dashboard", response_class=HTMLResponse)
+async def agency_dashboard_page(request: Request):
+    return templates.TemplateResponse(request, "agency_dashboard.html")
+
+
+@app.get("/agency-dashboard/stats")
+async def agency_dashboard_stats(
+    x_agency_key: Optional[str] = Header(default=None),
+    x_api_key:    Optional[str] = Header(default=None),
+):
+    agency_obj     = _require_agency_key(x_agency_key, x_api_key)
+    agency         = agency_obj.name
+    rows           = _bookings.get_by_agency(agency)
+    last_decisions = _bookings.get_last_decision_by_agency(agency)
+
+    active_count  = sum(1 for r in rows if r.get("_active"))
+    strike_count  = sum(1 for d in last_decisions.values() if d.get("action") == "STRIKE")
+    total_savings = sum(
+        float(d.get("net_savings", 0))
+        for d in last_decisions.values()
+        if d.get("action") == "STRIKE"
+    )
+
+    bookings_out = []
+    for row in rows:
+        bid       = row["booking_id"]
+        meta      = row.get("metadata", {})
+        is_active = row.get("_active", True)
+        last_dec  = last_decisions.get(bid, {})
+        action    = last_dec.get("action", "")
+
+        if not is_active:
+            status = "STOPPED"
+        elif action == "STRIKE":
+            status = "STRIKE"
+        elif action == "PHANTOM_HOLD":
+            status = "PHANTOM_HOLD"
+        else:
+            status = "MONITORING"
+
+        bookings_out.append({
+            "booking_id":        bid,
+            "route":             f"{row['origin']}-{row['destination']}",
+            "origin":            row["origin"],
+            "destination":       row["destination"],
+            "departure_date":    row["departure_date"][:10],
+            "original_price":    row["original_price"],
+            "current_price":     meta.get("current_price"),
+            "cancellation_fee":  row["cancellation_fee"],
+            "status":            status,
+            "last_action":       action or "WAIT",
+            "confidence_score":  last_dec.get("confidence_score"),
+            "net_savings":       last_dec.get("net_savings"),
+            "last_evaluated_at": last_dec.get("evaluated_at") or meta.get("last_evaluated_at"),
+            "submitted_at":      row.get("_created_at"),
+            "active":            is_active,
+        })
+
+    return {
+        "agency":   agency,
+        "stats": {
+            "total_bookings":  len(rows),
+            "active_bookings": active_count,
+            "strike_count":    strike_count,
+            "total_savings":   round(total_savings, 2),
+            "net_profit":      round(total_savings * 0.80, 2),
+            "ryde_fees":       round(total_savings * 0.20, 2),
+        },
+        "bookings": bookings_out,
+    }
+
+
+@app.get("/agency-dashboard/price-history/{route_key:path}")
+async def agency_dashboard_price_history(
+    route_key: str,
+    x_agency_key: Optional[str] = Header(default=None),
+    x_api_key:    Optional[str] = Header(default=None),
+):
+    _require_agency_key(x_agency_key, x_api_key)
+    points = await asyncio.to_thread(_price_history.get_price_history_for_chart, route_key)
+    return {"route_key": route_key, "points": points, "count": len(points)}
 
 
 # ---------------------------------------------------------------------------

@@ -1,0 +1,475 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>R.Y.D.E. Agency Dashboard</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+  <style>
+    ::-webkit-scrollbar { width: 5px; height: 5px; }
+    ::-webkit-scrollbar-track { background: #030712; }
+    ::-webkit-scrollbar-thumb { background: #1f2937; border-radius: 4px; }
+    .fade-in { animation: fadeIn .25s ease; }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+  </style>
+</head>
+<body class="bg-gray-950 text-gray-100 min-h-screen font-mono text-sm">
+
+<!-- ======================================================================
+     CONNECT MODAL  (shown until a valid key is stored)
+====================================================================== -->
+<div id="connectModal"
+     class="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm">
+  <div class="w-full max-w-sm mx-4 bg-gray-900 border border-gray-700/60 rounded-2xl p-8 shadow-2xl">
+    <div class="text-center mb-8">
+      <div class="text-2xl font-bold tracking-tight">R.Y.D.E.</div>
+      <div class="text-gray-500 text-xs mt-1">Agency Portfolio Dashboard</div>
+    </div>
+    <form onsubmit="return connectKey()">
+      <label class="block text-xs text-gray-500 uppercase tracking-widest mb-1.5">API Key</label>
+      <input id="keyInput" type="text" placeholder="ryde_test_..."
+             class="w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-3 text-sm
+                    focus:outline-none focus:border-emerald-500 transition-colors mb-3 font-mono"
+             autocomplete="off" spellcheck="false" />
+      <p id="connectErr" class="text-red-400 text-xs mb-3 hidden"></p>
+      <button type="submit"
+              class="w-full bg-emerald-600 hover:bg-emerald-500 active:bg-emerald-700
+                     text-white font-semibold rounded-lg py-2.5 text-sm transition-colors">
+        Connect &rarr;
+      </button>
+    </form>
+    <p class="text-center text-gray-700 text-xs mt-5">
+      Key is stored in your browser only &mdash; never transmitted to third parties.
+    </p>
+  </div>
+</div>
+
+<!-- ======================================================================
+     DASHBOARD SHELL
+====================================================================== -->
+<div id="shell" class="hidden flex flex-col min-h-screen">
+
+  <!-- Header -->
+  <header class="sticky top-0 z-40 border-b border-gray-800/80
+                 bg-gray-950/90 backdrop-blur-sm">
+    <div class="max-w-7xl mx-auto px-6 h-13 flex items-center justify-between py-3">
+      <div class="flex items-center gap-2.5">
+        <span class="font-bold tracking-tight">R.Y.D.E.</span>
+        <span class="text-gray-700">/</span>
+        <span class="text-gray-400" id="hAgency">Loading&hellip;</span>
+      </div>
+      <div class="flex items-center gap-3">
+        <span id="hUpdated" class="text-gray-600 text-xs hidden"></span>
+        <button onclick="loadAll()"
+                class="text-xs px-3 py-1.5 border border-gray-800 hover:border-gray-600
+                       text-gray-500 hover:text-gray-300 rounded-lg transition-colors">
+          &circlearrowleft; Refresh
+        </button>
+        <button onclick="disconnect()"
+                class="text-xs text-gray-600 hover:text-red-500 transition-colors">
+          Disconnect
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <main class="flex-1 max-w-7xl mx-auto w-full px-6 py-7 space-y-6">
+
+    <!-- ── Stats Bar ─────────────────────────────────────────────────── -->
+    <div class="grid grid-cols-2 lg:grid-cols-4 gap-4">
+      <div class="bg-gray-900 border border-gray-800 rounded-xl p-5 fade-in">
+        <p class="text-xs text-gray-500 uppercase tracking-widest mb-1">Total Savings</p>
+        <p class="text-2xl font-bold text-emerald-400">$<span id="sSavings">&mdash;</span></p>
+        <p class="text-xs text-gray-600 mt-1">gross across all strikes</p>
+      </div>
+      <div class="bg-gray-900 border border-gray-800 rounded-xl p-5 fade-in">
+        <p class="text-xs text-gray-500 uppercase tracking-widest mb-1">Active Bookings</p>
+        <p class="text-2xl font-bold text-blue-400"><span id="sActive">&mdash;</span></p>
+        <p class="text-xs text-gray-600 mt-1">currently monitored</p>
+      </div>
+      <div class="bg-gray-900 border border-gray-800 rounded-xl p-5 fade-in">
+        <p class="text-xs text-gray-500 uppercase tracking-widest mb-1">Successful Strikes</p>
+        <p class="text-2xl font-bold text-yellow-400"><span id="sStrikes">&mdash;</span></p>
+        <p class="text-xs text-gray-600 mt-1">rebook opportunities fired</p>
+      </div>
+      <div class="bg-gray-900 border border-gray-800 rounded-xl p-5 fade-in">
+        <p class="text-xs text-gray-500 uppercase tracking-widest mb-1">Net Profit</p>
+        <p class="text-2xl font-bold text-white">$<span id="sNet">&mdash;</span></p>
+        <p class="text-xs text-gray-600 mt-1">after RYDE 20% fee</p>
+      </div>
+    </div>
+
+    <!-- ── Bookings Table ────────────────────────────────────────────── -->
+    <div class="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden fade-in">
+      <div class="flex items-center justify-between px-6 py-4 border-b border-gray-800">
+        <h2 class="font-semibold">Monitored Portfolio</h2>
+        <span class="text-xs text-gray-600"><span id="bCount">0</span> bookings</span>
+      </div>
+      <div class="overflow-x-auto">
+        <table class="w-full">
+          <thead>
+            <tr class="text-left text-xs text-gray-500 uppercase tracking-widest
+                       border-b border-gray-800/80">
+              <th class="px-6 py-3">Route</th>
+              <th class="px-6 py-3">Departure</th>
+              <th class="px-6 py-3">Original</th>
+              <th class="px-6 py-3">Current</th>
+              <th class="px-6 py-3">Saving</th>
+              <th class="px-6 py-3">Status</th>
+              <th class="px-6 py-3">Last Scan</th>
+              <th class="px-6 py-3"></th>
+            </tr>
+          </thead>
+          <tbody id="tbody" class="divide-y divide-gray-800/60">
+            <tr>
+              <td colspan="8" class="px-6 py-10 text-center text-gray-600 text-xs">
+                Loading portfolio&hellip;
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- ── Price History Chart ───────────────────────────────────────── -->
+    <div class="bg-gray-900 border border-gray-800 rounded-xl p-6 fade-in">
+      <div class="flex items-start justify-between mb-5">
+        <div>
+          <h2 class="font-semibold" id="chartTitle">Price History</h2>
+          <p class="text-xs text-gray-500 mt-0.5" id="chartSub">
+            Click a booking row to load its price chart
+          </p>
+        </div>
+        <span id="chartMeta" class="text-xs text-gray-600 hidden"></span>
+      </div>
+      <div class="relative" style="height:260px">
+        <canvas id="priceChart"></canvas>
+        <div id="chartEmpty"
+             class="absolute inset-0 flex items-center justify-center
+                    text-gray-600 text-xs text-center px-8">
+          Select a booking above to view its fare history
+        </div>
+      </div>
+    </div>
+
+  </main>
+</div>
+
+<script>
+// ==========================================================================
+// State
+// ==========================================================================
+let apiKey   = null;
+let chart    = null;
+let timer    = null;
+let activeBid = null;
+
+// ==========================================================================
+// Boot
+// ==========================================================================
+(function () {
+  const k = localStorage.getItem('ryde_key');
+  if (k) { apiKey = k; showShell(); loadAll(); }
+  else    { showModal(); }
+})();
+
+function showModal()  {
+  document.getElementById('connectModal').classList.remove('hidden');
+  document.getElementById('shell').classList.add('hidden');
+}
+function showShell()  {
+  document.getElementById('connectModal').classList.add('hidden');
+  document.getElementById('shell').classList.remove('hidden');
+}
+function disconnect() {
+  localStorage.removeItem('ryde_key');
+  apiKey = null;
+  if (timer) clearInterval(timer);
+  showModal();
+}
+
+async function connectKey() {
+  const k   = document.getElementById('keyInput').value.trim();
+  const err = document.getElementById('connectErr');
+  err.classList.add('hidden');
+  if (!k) return false;
+  try {
+    const res = await fetch('/agency-dashboard/stats', { headers: { 'X-Agency-Key': k } });
+    if (!res.ok) {
+      err.textContent = res.status === 401 || res.status === 403
+        ? 'Invalid or revoked API key.' : 'Server error — please try again.';
+      err.classList.remove('hidden');
+      return false;
+    }
+    apiKey = k;
+    localStorage.setItem('ryde_key', k);
+    showShell();
+    const data = await res.json();
+    render(data);
+    scheduleRefresh();
+  } catch (e) {
+    err.textContent = 'Network error — check your connection.';
+    err.classList.remove('hidden');
+  }
+  return false;
+}
+
+// ==========================================================================
+// Data
+// ==========================================================================
+async function loadAll() {
+  try {
+    const res = await fetch('/agency-dashboard/stats', { headers: { 'X-Agency-Key': apiKey } });
+    if (res.status === 401 || res.status === 403) { disconnect(); return; }
+    render(await res.json());
+  } catch (e) { console.error('dashboard load failed', e); }
+}
+
+function scheduleRefresh() {
+  if (timer) clearInterval(timer);
+  timer = setInterval(loadAll, 60_000);
+}
+
+// ==========================================================================
+// Render
+// ==========================================================================
+function render({ agency, stats, bookings }) {
+  // Header
+  document.getElementById('hAgency').textContent = agency;
+  document.getElementById('hUpdated').textContent =
+    'Updated ' + new Date().toLocaleTimeString();
+  document.getElementById('hUpdated').classList.remove('hidden');
+
+  // Stats cards
+  document.getElementById('sSavings').textContent = usd(stats.total_savings);
+  document.getElementById('sActive').textContent  = stats.active_bookings;
+  document.getElementById('sStrikes').textContent = stats.strike_count;
+  document.getElementById('sNet').textContent     = usd(stats.net_profit);
+  document.getElementById('bCount').textContent   = bookings.length;
+
+  // Table
+  const tbody = document.getElementById('tbody');
+  if (!bookings.length) {
+    tbody.innerHTML = `<tr><td colspan="8"
+      class="px-6 py-12 text-center text-gray-600 text-xs">
+      No bookings yet &mdash; submit your first via
+      <code class="text-gray-500">POST /api/v1/monitor</code>.
+    </td></tr>`;
+    return;
+  }
+
+  tbody.innerHTML = bookings.map(b => {
+    const raw    = b.original_price && b.current_price != null
+      ? (b.original_price - b.current_price - (b.cancellation_fee || 0)) : null;
+    const saving = raw !== null ? raw.toFixed(2) : null;
+    const sColor = saving !== null
+      ? (raw > 0 ? 'text-emerald-400' : raw < 0 ? 'text-red-400' : 'text-gray-500')
+      : 'text-gray-600';
+
+    return `
+<tr data-bid="${b.booking_id}"
+    data-origin="${b.origin}" data-dest="${b.destination}"
+    data-dep="${b.departure_date}" data-orig-price="${b.original_price}"
+    data-route="${b.route}"
+    class="hover:bg-gray-800/40 transition-colors cursor-default
+           ${activeBid === b.booking_id ? 'bg-gray-800/60' : ''}">
+  <td class="px-6 py-3.5">
+    <div class="font-semibold tracking-wide">${b.route}</div>
+    <div class="text-xs text-gray-600 mt-0.5">${b.booking_id.slice(0,20)}&hellip;</div>
+  </td>
+  <td class="px-6 py-3.5 text-gray-300">${b.departure_date}</td>
+  <td class="px-6 py-3.5">$${b.original_price.toFixed(2)}</td>
+  <td class="px-6 py-3.5">
+    ${b.current_price != null
+      ? '$' + parseFloat(b.current_price).toFixed(2)
+      : '<span class="text-gray-600">&mdash;</span>'}
+  </td>
+  <td class="px-6 py-3.5 ${sColor}">
+    ${saving !== null
+      ? (raw > 0 ? '+$' + saving : '$' + saving)
+      : '<span class="text-gray-600">&mdash;</span>'}
+  </td>
+  <td class="px-6 py-3.5">${badge(b.status)}</td>
+  <td class="px-6 py-3.5 text-xs text-gray-500">
+    ${b.last_evaluated_at ? ago(b.last_evaluated_at) : '&mdash;'}
+  </td>
+  <td class="px-6 py-3.5">
+    <button onclick="selectRow(this.closest('tr'))"
+            class="text-xs text-gray-600 hover:text-emerald-400
+                   border border-gray-800 hover:border-emerald-700
+                   px-2.5 py-1 rounded-md transition-colors">
+      &nearr; Chart
+    </button>
+  </td>
+</tr>`;
+  }).join('');
+
+  scheduleRefresh();
+}
+
+// ==========================================================================
+// Chart
+// ==========================================================================
+function selectRow(row) {
+  document.querySelectorAll('#tbody tr').forEach(r =>
+    r.classList.remove('bg-gray-800/60'));
+  row.classList.add('bg-gray-800/60');
+  activeBid = row.dataset.bid;
+  loadChart(row.dataset);
+}
+
+async function loadChart({ origin, dest, dep, origPrice, route }) {
+  const routeKey = `${origin}-${dest}-${dep}`;
+  document.getElementById('chartTitle').textContent = `Price History — ${route}`;
+  document.getElementById('chartSub').textContent   = `departure ${dep}`;
+  document.getElementById('chartEmpty').classList.add('hidden');
+
+  try {
+    const res  = await fetch(`/agency-dashboard/price-history/${routeKey}`,
+                             { headers: { 'X-Agency-Key': apiKey } });
+    const data = await res.json();
+
+    if (!data.points || data.points.length === 0) {
+      document.getElementById('chartEmpty').textContent =
+        'No price snapshots yet. Data is recorded each time PRISM evaluates this booking.';
+      document.getElementById('chartEmpty').classList.remove('hidden');
+      if (chart) { chart.destroy(); chart = null; }
+      return;
+    }
+
+    document.getElementById('chartMeta').textContent =
+      `${data.count} snapshot${data.count !== 1 ? 's' : ''}`;
+    document.getElementById('chartMeta').classList.remove('hidden');
+
+    const labels = data.points.map(p => {
+      const d = new Date(p.timestamp);
+      return d.toLocaleDateString('en-US', {
+        month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'
+      });
+    });
+    const prices = data.points.map(p => p.price);
+    const orig   = parseFloat(origPrice);
+    drawChart(labels, prices, orig);
+  } catch (e) { console.error('chart load failed', e); }
+}
+
+function drawChart(labels, prices, originalPrice) {
+  const ctx = document.getElementById('priceChart').getContext('2d');
+  if (chart) chart.destroy();
+
+  const lo = Math.min(...prices, originalPrice) * 0.94;
+  const hi = Math.max(...prices, originalPrice) * 1.06;
+  const sparse = prices.length > 50;
+
+  chart = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [
+        {
+          label: 'Market Price',
+          data: prices,
+          borderColor: '#10b981',
+          backgroundColor: 'rgba(16,185,129,0.07)',
+          borderWidth: 2,
+          pointRadius: sparse ? 0 : 3,
+          pointHoverRadius: 5,
+          pointBackgroundColor: '#10b981',
+          fill: true,
+          tension: 0.35,
+        },
+        {
+          label: 'Original Price',
+          data: Array(labels.length).fill(originalPrice),
+          borderColor: 'rgba(107,114,128,0.6)',
+          borderWidth: 1.5,
+          borderDash: [5, 4],
+          pointRadius: 0,
+          fill: false,
+        },
+      ],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: {
+          labels: {
+            color: '#6b7280',
+            font: { size: 11, family: 'monospace' },
+            boxWidth: 14,
+          },
+        },
+        tooltip: {
+          backgroundColor: '#111827',
+          titleColor: '#f9fafb',
+          bodyColor: '#d1d5db',
+          borderColor: '#1f2937',
+          borderWidth: 1,
+          padding: 10,
+          callbacks: {
+            label: c => ` $${c.parsed.y.toFixed(2)}`,
+          },
+        },
+      },
+      scales: {
+        x: {
+          ticks: {
+            color: '#4b5563',
+            font: { size: 10, family: 'monospace' },
+            maxTicksLimit: 8,
+            maxRotation: 0,
+          },
+          grid: { color: 'rgba(31,41,55,0.8)' },
+        },
+        y: {
+          min: lo,
+          max: hi,
+          ticks: {
+            color: '#4b5563',
+            font: { size: 10, family: 'monospace' },
+            callback: v => '$' + v.toFixed(0),
+          },
+          grid: { color: 'rgba(31,41,55,0.8)' },
+        },
+      },
+    },
+  });
+}
+
+// ==========================================================================
+// Helpers
+// ==========================================================================
+function badge(status) {
+  const MAP = {
+    STRIKE:       ['bg-emerald-950 text-emerald-400 border-emerald-800', '&#9679; STRIKE'],
+    PHANTOM_HOLD: ['bg-yellow-950 text-yellow-400 border-yellow-800',   '&#9682; HOLD'],
+    MONITORING:   ['bg-blue-950 text-blue-400 border-blue-800',         '&#9676; MONITORING'],
+    STOPPED:      ['bg-gray-800 text-gray-500 border-gray-700',         '&mdash; STOPPED'],
+  };
+  const [cls, label] = MAP[status] || MAP.MONITORING;
+  return `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-md border
+                       text-xs font-mono ${cls}">${label}</span>`;
+}
+
+function usd(n) {
+  if (n == null) return '—';
+  return parseFloat(n).toLocaleString('en-US',
+    { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+function ago(iso) {
+  try {
+    const m = Math.floor((Date.now() - new Date(iso).getTime()) / 60_000);
+    if (m < 1)  return 'just now';
+    if (m < 60) return `${m}m ago`;
+    const h = Math.floor(m / 60);
+    if (h < 24) return `${h}h ago`;
+    return `${Math.floor(h / 24)}d ago`;
+  } catch { return iso; }
+}
+</script>
+</body>
+</html>

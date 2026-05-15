@@ -163,3 +163,33 @@ class PriceHistory:
             default=0.0,
         )
         return max_drop if max_drop > 0 else None
+
+    def get_price_history_for_chart(
+        self,
+        route_key: str,
+        max_rows: int = 120,
+    ) -> List[dict]:
+        """
+        Returns [{timestamp, price}] ordered oldest-first for Chart.js.
+        Fetches the `max_rows` most-recent snapshots then reverses to ASC
+        so the chart always shows the most recent window chronologically.
+        """
+        with self._lock, self._conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT captured_at, price
+                FROM (
+                    SELECT captured_at, price
+                    FROM price_snapshots
+                    WHERE route_key = ?
+                    ORDER BY captured_at DESC
+                    LIMIT ?
+                ) sub
+                ORDER BY captured_at ASC
+                """,
+                (route_key, max_rows),
+            ).fetchall()
+        return [
+            {"timestamp": str(row[0]), "price": round(float(row[1]), 2)}
+            for row in rows
+        ]
