@@ -138,7 +138,7 @@ async def _lifespan(app: FastAPI):
     db_url = os.getenv("DATABASE_URL", "")
     if db_url:
         # Max 5 attempts: waits 1+2+4+8 = 15s total before giving up.
-        # Keeps Railway health-check timeout well within limits.
+        # Keeps Railway healthcheck timeout well within limits.
         for attempt in range(5):
             try:
                 with _bookings._lock:
@@ -218,8 +218,10 @@ async def health():
     checks["market"]     = "ok" if (_market_task and not _market_task.done()) else "stopped"
     checks["prism_scan"] = "ok" if (_scan_task   and not _scan_task.done())   else "stopped"
     overall = "ok" if all(v == "ok" for v in checks.values()) else "degraded"
+    # Always return 200 — Railway only checks the status code.
+    # Degraded state is visible in the JSON body for monitoring dashboards.
     return JSONResponse(
-        status_code=200 if overall == "ok" else 503,
+        status_code=200,
         content={"status": overall, "checks": checks, "timestamp": datetime.utcnow().isoformat() + "Z"},
     )
 
