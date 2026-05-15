@@ -28,9 +28,6 @@ from .stripe_client import StripeClient
 
 log = logging.getLogger(__name__)
 
-# The app is wired with lifespan=_lifespan so that startup/shutdown
-# run correctly on Railway. Routers are attached after the lifespan is defined.
-
 _db_path  = os.getenv("RYDE_DB_PATH", "ryde.db")
 _clients  = ClientStore(_db_path)
 _bookings = BookingStore(_db_path)
@@ -41,8 +38,6 @@ _BASE_URL        = os.getenv("BASE_URL", "http://localhost:8000")
 _MARKET_INTERVAL = float(os.getenv("MARKET_TICK_SECONDS", "3"))
 _SCAN_INTERVAL   = int(os.getenv("PRISM_SCAN_INTERVAL_SECONDS", "900"))  # 15 min default
 
-# Signal API model — PriceMonitor drives time-decay re-evaluations only.
-# No external adapter polling. Instantiated during lifespan.
 _price_monitor: Optional[PriceMonitor] = None
 
 
@@ -112,15 +107,14 @@ def _on_ryde_event(event: dict) -> None:
 
 async def _prism_background_scan() -> None:
     """
-    Signal API time-decay scanner — no external API calls.
+    Signal API time-decay scanner.
     Runs every PRISM_SCAN_INTERVAL_SECONDS (default 15 min).
     Per-booking cadence inside scan_all_active() based on days_to_departure:
-      >= 14 days  →  every 60 min
-       7–14 days  →  every 30 min
-        < 7 days  →  every 15 min
-    Bookings evaluated too recently for their cadence tier are skipped.
+      >= 14 days  ->  every 60 min
+       7-14 days  ->  every 30 min
+        < 7 days  ->  every 15 min
     """
-    await asyncio.sleep(60)   # warm-up: let the server fully start first
+    await asyncio.sleep(60)   # warm-up
     while True:
         try:
             count = await scan_all_active()
@@ -135,35 +129,35 @@ async def _prism_background_scan() -> None:
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
-    """FastAPI lifespan — replaces deprecated @on_event startup/shutdown hooks."""
+    """FastAPI lifespan handler."""
     global _loop, _market_task, _scan_task, _price_monitor
 
-    # ── Startup ────────────────────────────────────────────────────────────
+    # -- Startup ----------------------------------------------------------------
     Path(_db_path).parent.mkdir(parents=True, exist_ok=True)
 
     db_url = os.getenv("DATABASE_URL", "")
     if db_url:
-        for attempt in range(10):
+        # Max 5 attempts: waits 1+2+4+8 = 15s total before giving up.
+        # Keeps Railway health-check timeout well within limits.
+        for attempt in range(5):
             try:
                 with _bookings._lock:
                     _bookings._execute("SELECT 1").fetchone()
                 break
             except Exception as exc:
-                if attempt == 9:
+                if attempt == 4:
                     log.error(
-                        "PostgreSQL not reachable after 10 attempts: %s", exc,
+                        "PostgreSQL not reachable after 5 attempts: %s", exc,
                         exc_info=True,
                     )
                     raise
                 wait = 2 ** attempt
                 log.warning(
-                    "PostgreSQL not ready (attempt %d/10), retrying in %ds",
+                    "PostgreSQL not ready (attempt %d/5), retrying in %ds",
                     attempt + 1, wait,
                 )
                 await asyncio.sleep(wait)
 
-    # Signal API model: PriceMonitor re-evaluates stored prices only.
-    # No DuffelAdapter / AmadeusAdapter required.
     _price_monitor = PriceMonitor(store=_bookings, scan_interval=_SCAN_INTERVAL)
     _price_monitor.start()
 
@@ -177,10 +171,10 @@ async def _lifespan(app: FastAPI):
         extra={"db": "postgres" if db_url else "sqlite", "scan_interval_s": _SCAN_INTERVAL},
     )
 
-    yield  # ── Server is running ──────────────────────────────────────────
+    yield  # -- Server is running -----------------------------------------------
 
-    # ── Shutdown ───────────────────────────────────────────────────────────
-    log.info("RYDE shutting down…")
+    # -- Shutdown ---------------------------------------------------------------
+    log.info("RYDE shutting down...")
     if _price_monitor is not None:
         _price_monitor.stop()
     ryde_events.unsubscribe(_on_ryde_event)
@@ -199,7 +193,7 @@ async def _lifespan(app: FastAPI):
             pass
     log.info("RYDE shutdown complete.")
 
-# Wire the lifespan into the app after it's defined
+
 app = FastAPI(title="RYDE", lifespan=_lifespan)
 app.include_router(api_v1_router)
 app.include_router(admin_router)
@@ -408,8 +402,6 @@ async def ryde_webhook(request: Request):
         savings = float(payload.get("savings_realized", 0))
         client  = _clients.get_client(booking_id)
         if client and savings > 0:
-            # Record savings for dashboard display only — billing is invoiced
-            # manually at month-end via the agency's subscription plan.
             _clients.add_savings(booking_id, savings)
     if booking_id:
         _clients.log_event(booking_id, event, payload)
