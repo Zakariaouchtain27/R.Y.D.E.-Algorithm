@@ -3,6 +3,10 @@ Agency and API key management.
 
 Uses PostgreSQL when DATABASE_URL is set, SQLite otherwise.
 Keys stored in plaintext for MVP. Production: store HMAC-SHA256(key).
+
+PostgreSQL connection is deferred to the first actual query so that
+module import (and therefore uvicorn startup) never blocks waiting
+for the database to become available.
 """
 import os
 import re
@@ -11,7 +15,7 @@ import sqlite3
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
-from threading import Lock
+from threading import RLock
 from typing import List, Optional
 
 _DATABASE_URL = os.getenv("DATABASE_URL", "")
@@ -34,34 +38,53 @@ class Agency:
 
 class AgencyStore:
     def __init__(self, db_path: str = "ryde.db"):
-        self._lock = Lock()
-        self._pg = bool(_DATABASE_URL)
+        self._lock  = RLock()   # RLock: same thread can re-enter during lazy init
+        self._pg    = bool(_DATABASE_URL)
+        self._ready = False     # True after connection + schema are initialised
+        self._conn  = None
 
         if self._pg:
-            import psycopg2
             import psycopg2.extras
-            self._conn = psycopg2.connect(_DATABASE_URL)
-            self._conn.autocommit = False
             self._dict_cursor = psycopg2.extras.DictCursor
+            # Connection deferred to first _execute call.  Connecting at
+            # import time would block the whole Python process for up to the
+            # OS TCP timeout (~120s) if PostgreSQL isn’t ready yet.
         else:
             from pathlib import Path
             Path(db_path).parent.mkdir(parents=True, exist_ok=True)
             self._conn = sqlite3.connect(db_path, check_same_thread=False)
             self._conn.row_factory = sqlite3.Row
             self._dict_cursor = None
-
-        self._init_schema()
-        self._seed_dev_keys()
+            self._init_schema()
+            self._seed_dev_keys()
+            self._ready = True
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _ensure_ready(self) -> None:
+        """Connect to PostgreSQL and init schema on first use.
+        Must be called while holding self._lock."""
+        if self._ready:
+            return
+        import psycopg2
+        import psycopg2.extras
+        self._conn = psycopg2.connect(_DATABASE_URL)
+        self._conn.autocommit = False
+        self._conn.cursor_factory = self._dict_cursor
+        # Set _ready before calling _init_schema so that _execute calls
+        # inside _init_schema don’t recurse back into this method.
+        self._ready = True
+        self._init_schema()
+        self._seed_dev_keys()
 
     def _q(self, sql: str) -> str:
         return sql.replace("?", "%s") if self._pg else sql
 
     def _execute(self, sql: str, params=()):
         if self._pg:
+            self._ensure_ready()
             cur = self._conn.cursor(cursor_factory=self._dict_cursor)
         else:
             cur = self._conn.cursor()

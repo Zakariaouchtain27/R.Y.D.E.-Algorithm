@@ -3,7 +3,7 @@ import os
 import sqlite3
 from datetime import datetime
 from pathlib import Path
-from threading import Lock
+from threading import RLock
 from typing import List, Optional
 
 from .models import Booking, Passenger
@@ -15,28 +15,48 @@ class BookingStore:
     """
     SQLite-backed store for local dev; PostgreSQL in production.
     Set DATABASE_URL to switch engines — no other changes needed.
+
+    PostgreSQL connection is deferred to the first actual query so that
+    module import (and therefore uvicorn startup) never blocks waiting
+    for the database to become available.
     """
 
     def __init__(self, db_path: str = "ryde.db"):
-        self._lock = Lock()
-        self._pg = bool(_DATABASE_URL)
+        self._lock  = RLock()   # RLock: same thread can re-enter during lazy init
+        self._pg    = bool(_DATABASE_URL)
+        self._ready = False     # True after connection + schema are initialised
+        self._conn  = None
 
         if self._pg:
-            import psycopg2
             import psycopg2.extras
-            self._conn = psycopg2.connect(_DATABASE_URL)
-            self._conn.autocommit = False
             self._dict_cursor = psycopg2.extras.DictCursor
+            # Connection deferred to first _execute call.  Connecting at
+            # import time would block the whole Python process for up to the
+            # OS TCP timeout (~120s) if PostgreSQL isn’t ready yet, which
+            # prevents Railway’s healthcheck from ever getting a response.
         else:
             Path(db_path).parent.mkdir(parents=True, exist_ok=True)
             self._conn = sqlite3.connect(db_path, check_same_thread=False)
             self._dict_cursor = None
-
-        self._init_schema()
+            self._init_schema()
+            self._ready = True
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _ensure_ready(self) -> None:
+        """Connect to PostgreSQL and init schema on first use.
+        Must be called while holding self._lock."""
+        if self._ready:
+            return
+        import psycopg2
+        self._conn = psycopg2.connect(_DATABASE_URL)
+        self._conn.autocommit = False
+        # Set _ready before calling _init_schema so that _execute calls
+        # inside _init_schema don’t recurse back into this method.
+        self._ready = True
+        self._init_schema()
 
     def _q(self, sql: str) -> str:
         """Swap SQLite ? placeholders for PostgreSQL %s."""
@@ -45,6 +65,7 @@ class BookingStore:
     def _execute(self, sql: str, params=()):
         """Always call under self._lock."""
         if self._pg:
+            self._ensure_ready()
             cur = self._conn.cursor(cursor_factory=self._dict_cursor)
         else:
             cur = self._conn.cursor()
