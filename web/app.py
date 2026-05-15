@@ -135,28 +135,9 @@ async def _lifespan(app: FastAPI):
     # -- Startup ----------------------------------------------------------------
     Path(_db_path).parent.mkdir(parents=True, exist_ok=True)
 
-    db_url = os.getenv("DATABASE_URL", "")
-    if db_url:
-        # Max 5 attempts: waits 1+2+4+8 = 15s total before giving up.
-        # Keeps Railway healthcheck timeout well within limits.
-        for attempt in range(5):
-            try:
-                with _bookings._lock:
-                    _bookings._execute("SELECT 1").fetchone()
-                break
-            except Exception as exc:
-                if attempt == 4:
-                    log.error(
-                        "PostgreSQL not reachable after 5 attempts: %s", exc,
-                        exc_info=True,
-                    )
-                    raise
-                wait = 2 ** attempt
-                log.warning(
-                    "PostgreSQL not ready (attempt %d/5), retrying in %ds",
-                    attempt + 1, wait,
-                )
-                await asyncio.sleep(wait)
+    # No blocking DB call here. Any synchronous DB call in an async context
+    # freezes the entire event loop — Railway's healthcheck gets no response
+    # and kills the deployment. DB connects lazily on first real use instead.
 
     _price_monitor = PriceMonitor(store=_bookings, scan_interval=_SCAN_INTERVAL)
     _price_monitor.start()
@@ -168,7 +149,7 @@ async def _lifespan(app: FastAPI):
 
     log.info(
         "RYDE startup complete",
-        extra={"db": "postgres" if db_url else "sqlite", "scan_interval_s": _SCAN_INTERVAL},
+        extra={"db": "postgres" if os.getenv("DATABASE_URL") else "sqlite", "scan_interval_s": _SCAN_INTERVAL},
     )
 
     yield  # -- Server is running -----------------------------------------------
@@ -206,20 +187,31 @@ templates = Jinja2Templates(directory=template_dir)
 # Health
 # ---------------------------------------------------------------------------
 
+def _db_ping() -> str:
+    """Synchronous DB ping — called via asyncio.to_thread so it never blocks the event loop."""
+    try:
+        with _bookings._lock:
+            _bookings._execute("SELECT 1").fetchone()
+        return "ok"
+    except Exception as exc:
+        return f"error: {exc}"
+
+
 @app.get("/health")
 async def health():
     checks: dict = {}
     try:
-        with _bookings._lock:
-            _bookings._execute("SELECT 1").fetchone()
-        checks["db"] = "ok"
-    except Exception as exc:
-        checks["db"] = f"error: {exc}"
+        # Run DB check in a thread pool with a hard 5-second cap so the event
+        # loop stays free and Railway always gets a response within the timeout.
+        checks["db"] = await asyncio.wait_for(
+            asyncio.to_thread(_db_ping), timeout=5.0
+        )
+    except asyncio.TimeoutError:
+        checks["db"] = "timeout"
     checks["market"]     = "ok" if (_market_task and not _market_task.done()) else "stopped"
     checks["prism_scan"] = "ok" if (_scan_task   and not _scan_task.done())   else "stopped"
     overall = "ok" if all(v == "ok" for v in checks.values()) else "degraded"
     # Always return 200 — Railway only checks the status code.
-    # Degraded state is visible in the JSON body for monitoring dashboards.
     return JSONResponse(
         status_code=200,
         content={"status": overall, "checks": checks, "timestamp": datetime.utcnow().isoformat() + "Z"},
