@@ -37,6 +37,16 @@ Idempotency
 POST /monitor accepts an optional  Idempotency-Key: <uuid>  header.
 Returns the original 201 response on duplicate keys — safe to retry.
 
+Success-fee billing
+-------------------
+Every STRIKE decision triggers an automatic 20% success-fee charge
+against the agency's stored Stripe card (stripe_customer_id in agencies
+table). Requires STRIPE_SECRET_KEY env var and a Stripe customer on file.
+All charge outcomes are written to the audit trail:
+  billing_charged — fee_usd, net_savings, stripe_payment_intent
+  billing_error   — fee_usd, error; also fires ryde.billing_error webhook
+  billing_skipped — no_stripe_customer (card not yet on file)
+
 Endpoints
 ---------
 POST   /api/v1/predict              Pre-booking: BOOK or WAIT decision
@@ -80,19 +90,35 @@ _engine   = PRISMEngine(_db_path)
 _notifier = Notifier()
 _executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="prism")
 
+# ---------------------------------------------------------------------------
+# Stripe success-fee client (None when STRIPE_SECRET_KEY is not configured)
+# ---------------------------------------------------------------------------
+
+def _make_stripe_client():
+    key = os.getenv("STRIPE_SECRET_KEY", "")
+    if not key:
+        return None
+    try:
+        from .stripe_client import StripeClient
+        return StripeClient(key)
+    except ImportError:
+        log.warning("stripe package not installed — success-fee billing disabled")
+        return None
+
+
+_stripe_client = _make_stripe_client()
+
 # Seconds between re-evaluations per booking based on days to departure.
-# Background scan runs every 15 min; this controls per-booking cadence.
 _EVAL_INTERVAL = {"far": 3600, "close": 1800, "urgent": 900}
-_PATCH_COOLDOWN = 300   # seconds: skip PATCH-triggered eval at same price
+_PATCH_COOLDOWN = 300
 
 
 def _scan_interval(days: int) -> int:
-    """How often (seconds) PRISM should re-evaluate a booking."""
     if days >= 14:
-        return _EVAL_INTERVAL["far"]     # 60 min
+        return _EVAL_INTERVAL["far"]
     if days >= 7:
-        return _EVAL_INTERVAL["close"]   # 30 min
-    return _EVAL_INTERVAL["urgent"]      # 15 min
+        return _EVAL_INTERVAL["close"]
+    return _EVAL_INTERVAL["urgent"]
 
 
 # ---------------------------------------------------------------------------
@@ -147,12 +173,80 @@ async def require_api_key(
 # ---------------------------------------------------------------------------
 
 def _seconds_since(iso_str: str) -> float:
-    """Seconds elapsed since an ISO-8601 UTC timestamp string."""
     try:
         ts = datetime.fromisoformat(iso_str.rstrip("Z")).replace(tzinfo=timezone.utc)
         return (datetime.now(timezone.utc) - ts).total_seconds()
     except Exception:
         return float("inf")
+
+
+def _charge_success_fee_sync(
+    booking: Booking,
+    agency_name: str,
+    net_savings: float,
+) -> None:
+    """
+    Charge 20% success fee against the agency's Stripe card on file.
+
+    Runs synchronously inside the PRISM executor thread.
+    Writes billing_charged / billing_error / billing_skipped to audit trail.
+    """
+    if _stripe_client is None:
+        log.debug(
+            "STRIPE_SECRET_KEY not configured — skipping success fee for %s",
+            booking.booking_id,
+        )
+        return
+
+    fee     = round(net_savings * 0.20, 2)
+    now_iso = datetime.utcnow().isoformat() + "Z"
+
+    ag = _agencies.get_by_name(agency_name)
+    if not ag or not ag.stripe_customer_id:
+        log.warning(
+            "No Stripe customer on file for agency '%s' — cannot charge success fee for %s",
+            agency_name, booking.booking_id,
+        )
+        _bookings.log_audit(booking.booking_id, agency_name, "billing_skipped", {
+            "reason":      "no_stripe_customer",
+            "fee_usd":     fee,
+            "net_savings": round(net_savings, 2),
+            "skipped_at":  now_iso,
+        })
+        return
+
+    success, pi, error = _stripe_client.charge_success_fee(
+        customer_id=ag.stripe_customer_id,
+        amount_usd=fee,
+        booking_id=booking.booking_id,
+        net_savings=net_savings,
+    )
+
+    if success:
+        pi_id = pi.id if pi else None
+        log.info(
+            "Success fee $%.2f charged for booking %s (agency: %s, pi: %s)",
+            fee, booking.booking_id, agency_name, pi_id,
+        )
+        _bookings.log_audit(booking.booking_id, agency_name, "billing_charged", {
+            "fee_usd":               fee,
+            "net_savings":           round(net_savings, 2),
+            "fee_pct":               20,
+            "stripe_payment_intent": pi_id,
+            "charged_at":            now_iso,
+        })
+    else:
+        log.error(
+            "Success fee charge FAILED for booking %s (agency: %s): %s",
+            booking.booking_id, agency_name, error,
+        )
+        _bookings.log_audit(booking.booking_id, agency_name, "billing_error", {
+            "fee_usd":    fee,
+            "net_savings": round(net_savings, 2),
+            "error":      error or "Unknown error",
+            "failed_at":  now_iso,
+        })
+        _notifier.billing_error(booking, fee, error or "Unknown error")
 
 
 def _run_prism_sync(
@@ -163,8 +257,6 @@ def _run_prism_sync(
 ) -> str:
     """
     CPU-bound: runs 5,000 Monte Carlo paths. Always called via run_in_executor.
-    Re-fetches the booking from DB for freshest data, then writes back
-    last_evaluated_price / last_evaluated_at to prevent duplicate webhooks.
     """
     booking = _bookings.get_by_id(booking_id)
     if not booking:
@@ -210,6 +302,13 @@ def _run_prism_sync(
     if decision.action in (RYDEAction.STRIKE, RYDEAction.PHANTOM_HOLD):
         _notifier.decision(booking, decision)
 
+    # Charge 20% success fee on every STRIKE.
+    # Signal API mode: agency acts on the webhook; we bill at decision time.
+    if decision.action == RYDEAction.STRIKE:
+        net_savings = booking.original_price - current_price - booking.cancellation_fee
+        if net_savings > 0:
+            _charge_success_fee_sync(booking, agency, net_savings)
+
     return decision.action.value
 
 
@@ -219,7 +318,6 @@ async def _trigger_prism(
     seats_remaining: int,
     agency: str,
 ) -> None:
-    """Non-blocking: offloads CPU-bound PRISM to thread pool."""
     loop = asyncio.get_event_loop()
     await loop.run_in_executor(
         _executor,
@@ -296,15 +394,15 @@ def _booking_to_response(d: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# POST /predict  — pre-booking price prediction
+# POST /predict
 # ---------------------------------------------------------------------------
 
 class PredictRequest(BaseModel):
     origin:          str   = Field(..., min_length=3, max_length=3)
     destination:     str   = Field(..., min_length=3, max_length=3)
     departure_date:  str   = Field(..., description="YYYY-MM-DD")
-    current_price:   float = Field(..., gt=0, description="Current market fare you are evaluating.")
-    seats_remaining: int   = Field(9, ge=0, description="Seats available at this price (optional).")
+    current_price:   float = Field(..., gt=0)
+    seats_remaining: int   = Field(9, ge=0)
 
     @field_validator("origin", "destination")
     @classmethod
@@ -330,40 +428,26 @@ def _run_predict_sync(
     current_price: float,
     seats_remaining: int,
 ) -> dict:
-    """
-    CPU-bound pre-booking prediction via PRISM OU + Monte Carlo.
-    Always called via run_in_executor — never blocks the event loop.
-
-    Uses a fresh OrnsteinUhlenbeck instance per request so concurrent
-    calls never corrupt each other’s fitted parameters.
-    """
     from ryde.prism.price_history import make_route_key
     from ryde.prism.stochastic import OrnsteinUhlenbeck
 
-    N_PATHS              = 5000
-    WAIT_PROB_THRESHOLD  = 0.55    # >55% chance of a drop → WAIT
-    WAIT_DROP_THRESHOLD  = 10.0    # expected saving must exceed $10 to matter
+    N_PATHS             = 5000
+    WAIT_PROB_THRESHOLD = 0.55
+    WAIT_DROP_THRESHOLD = 10.0
 
     dep     = datetime.strptime(departure_date, "%Y-%m-%d")
     days    = max(1, (dep.replace(tzinfo=None) - datetime.now().replace(tzinfo=None)).days)
-    horizon = min(14, days)   # predict up to 14 days ahead; never past departure
+    horizon = min(14, days)
 
-    route_key = make_route_key(origin, destination, departure_date)
-
-    # Fit a route-specific OU model from stored price history if available.
-    # Never mutate the shared _engine.ou — this is a completely independent instance.
-    ou           = OrnsteinUhlenbeck()
-    price_series = _engine.history.get_price_series(route_key)
+    route_key       = make_route_key(origin, destination, departure_date)
+    ou              = OrnsteinUhlenbeck()
+    price_series    = _engine.history.get_price_series(route_key)
     if len(price_series) >= 10:
         ou.fit(price_series)
 
-    # Anchor (long-run mean): use rolling median from history, else current price.
     reference_price = _engine.history.get_reference_price(route_key) or current_price
+    theta_now       = ou.u_curve_mean(reference_price, days)
 
-    # Fair-value estimate at today’s days-to-departure via the U-curve model.
-    theta_now = ou.u_curve_mean(reference_price, days)
-
-    # Simulate N_PATHS price paths over the prediction horizon.
     rng   = np.random.default_rng()
     paths = ou.simulate_paths(
         current_price=current_price,
@@ -373,24 +457,20 @@ def _run_predict_sync(
         rng=rng,
     )
 
-    # --- Statistics ----------------------------------------------------
-    min_prices         = paths.min(axis=1)           # cheapest price each path reaches
-    expected_end_price = float(paths[:, -1].mean())  # mean fare at end of horizon
-    will_drop          = min_prices < current_price  # paths where a cheaper fare appears
+    min_prices         = paths.min(axis=1)
+    expected_end_price = float(paths[:, -1].mean())
+    will_drop          = min_prices < current_price
     prob_drop          = float(will_drop.mean())
 
     if will_drop.sum() > 0:
-        drop_amounts   = current_price - min_prices[will_drop]
-        expected_drop  = float(drop_amounts.mean())
-        drop_p95       = float(np.percentile(drop_amounts, 95))
+        drop_amounts  = current_price - min_prices[will_drop]
+        expected_drop = float(drop_amounts.mean())
+        drop_p95      = float(np.percentile(drop_amounts, 95))
     else:
         expected_drop = drop_p95 = 0.0
 
-    # Fractional position of current price relative to the fair-value estimate.
-    # Positive → overpriced (above mean-reversion target, price likely to fall).
     pct_above = (current_price - theta_now) / theta_now
 
-    # --- Decision ------------------------------------------------------
     if prob_drop > WAIT_PROB_THRESHOLD and expected_drop > WAIT_DROP_THRESHOLD:
         decision   = "WAIT"
         confidence = round(min(prob_drop * 100, 99.0), 1)
@@ -398,54 +478,36 @@ def _run_predict_sync(
         decision   = "BOOK"
         confidence = round(min((1.0 - prob_drop) * 100, 99.0), 1)
 
-    # --- Reasoning -----------------------------------------------------
     pct_pct = abs(pct_above) * 100
-
     if pct_above > 0.005:
-        position = (
-            f"Price is currently {pct_pct:.1f}% above the predicted "
-            f"mean-reversion level of ${theta_now:.0f}"
-        )
+        position = f"Price is currently {pct_pct:.1f}% above the predicted mean-reversion level of ${theta_now:.0f}"
     elif pct_above < -0.005:
-        position = (
-            f"Price is currently {pct_pct:.1f}% below the predicted "
-            f"fair-value level of ${theta_now:.0f} — the fare is already attractively priced"
-        )
+        position = f"Price is currently {pct_pct:.1f}% below the predicted fair-value level of ${theta_now:.0f} — the fare is already attractively priced"
     else:
-        position = (
-            f"Price is trading at its predicted fair-value level of ${theta_now:.0f}"
-        )
+        position = f"Price is trading at its predicted fair-value level of ${theta_now:.0f}"
 
     if decision == "WAIT":
         reasoning = (
-            f"{position}. "
-            f"Monte Carlo analysis of {N_PATHS:,} simulated OU price paths over the "
-            f"next {horizon} days shows a {prob_drop * 100:.0f}% probability of a "
-            f"cheaper fare emerging, with an expected saving of ${expected_drop:.0f} "
-            f"(95th-percentile upside: ${drop_p95:.0f}). "
-            f"The model projects the fare will reach ${expected_end_price:.0f} by "
-            f"day {horizon}. Statistical evidence favours waiting."
+            f"{position}. Monte Carlo analysis of {N_PATHS:,} simulated OU price paths over the "
+            f"next {horizon} days shows a {prob_drop * 100:.0f}% probability of a cheaper fare "
+            f"emerging, with an expected saving of ${expected_drop:.0f} (95th-percentile: ${drop_p95:.0f}). "
+            f"The model projects the fare will reach ${expected_end_price:.0f} by day {horizon}. "
+            f"Statistical evidence favours waiting."
         )
     elif pct_above < -0.005:
         reasoning = (
-            f"{position}. "
-            f"With only a {prob_drop * 100:.0f}% probability of further decline "
-            f"(expected drop: ${expected_drop:.0f}), the risk of waiting for a "
-            f"smaller saving outweighs the opportunity cost. "
+            f"{position}. With only a {prob_drop * 100:.0f}% probability of further decline "
+            f"(expected drop: ${expected_drop:.0f}), the risk of waiting outweighs the opportunity cost. "
             f"Booking now locks in a fare already below model fair value."
         )
     else:
         reasoning = (
-            f"{position}. "
-            f"Simulation of {N_PATHS:,} OU paths over {horizon} days shows a "
-            f"{prob_drop * 100:.0f}% probability of a price drop averaging "
-            f"${expected_drop:.0f}. "
+            f"{position}. Simulation of {N_PATHS:,} OU paths over {horizon} days shows a "
+            f"{prob_drop * 100:.0f}% probability of a price drop averaging ${expected_drop:.0f}. "
             f"The projected fare in {horizon} days is ${expected_end_price:.0f}. "
-            f"Drop probability is below the WAIT threshold — "
-            f"booking now is the lower-risk choice."
+            f"Drop probability is below the WAIT threshold — booking now is the lower-risk choice."
         )
 
-    # Free the (N_PATHS × horizon) ndarray immediately to keep RAM flat.
     del paths
     gc.collect()
 
@@ -473,20 +535,6 @@ async def predict_price(
     payload: PredictRequest,
     auth: tuple = Depends(require_api_key),
 ):
-    """
-    Pre-booking BOOK / WAIT decision.
-
-    Uses the PRISM Ornstein-Uhlenbeck Monte Carlo engine to estimate
-    the probability that a cheaper fare will appear over the next 14 days
-    (or until departure if sooner).
-
-    Decision thresholds:
-    - **WAIT**: >55% probability of a drop AND expected saving > $10
-    - **BOOK**: drop probability is low, saving is negligible, or price is
-      already below the model’s fair-value estimate
-
-    No booking record is created. This is a pure prediction call.
-    """
     loop   = asyncio.get_event_loop()
     result = await loop.run_in_executor(
         _executor,
@@ -497,14 +545,12 @@ async def predict_price(
         payload.current_price,
         payload.seats_remaining,
     )
-
     log.info(
         "PRISM predict [%s-%s %s $%.0f] → %s (P(drop)=%.0f%%, E[drop]=$%.0f)",
         payload.origin, payload.destination, payload.departure_date,
         payload.current_price, result["decision"],
         result["prob_drop_pct"], result["expected_future_drop"],
     )
-
     return {
         "route":          f"{payload.origin}-{payload.destination}",
         "origin":         payload.origin,
@@ -517,7 +563,7 @@ async def predict_price(
 
 
 # ---------------------------------------------------------------------------
-# POST /monitor  — submit a booking
+# POST /monitor
 # ---------------------------------------------------------------------------
 
 class MonitorRequest(BaseModel):
@@ -526,10 +572,7 @@ class MonitorRequest(BaseModel):
     departure_date:   str   = Field(..., description="YYYY-MM-DD")
     original_price:   float = Field(..., gt=0)
     cancellation_fee: float = Field(..., ge=0)
-    current_price:    Optional[float] = Field(
-        None, gt=0,
-        description="Current market price. If net_savings > 0, PRISM evaluates immediately.",
-    )
+    current_price:    Optional[float] = Field(None, gt=0)
     seats_remaining:  int   = Field(9, ge=0)
     cabin_class:      Literal["economy", "premium_economy", "business", "first"] = "economy"
     fare_type:        Literal["refundable", "partially_refundable"] = "refundable"
@@ -697,17 +740,11 @@ async def get_booking_audit(tracking_id: str, auth: tuple = Depends(require_api_
 
 
 # ---------------------------------------------------------------------------
-# PATCH /bookings/{id}  — push a new price or update booking details
+# PATCH /bookings/{id}
 # ---------------------------------------------------------------------------
 
 class PatchBookingRequest(BaseModel):
-    current_price:    Optional[float] = Field(
-        None, gt=0,
-        description=(
-            "New market price from your GDS. Triggers PRISM if net_savings > 0. "
-            "Silently skipped if same as last evaluated price and < 5 min have passed."
-        ),
-    )
+    current_price:    Optional[float] = Field(None, gt=0)
     seats_remaining:  Optional[int]   = Field(None, ge=0)
     webhook_url:      Optional[str]   = None
     cancellation_fee: Optional[float] = Field(None, ge=0)
@@ -775,10 +812,10 @@ async def patch_booking(
         if net_savings <= 0:
             prism_skipped_reason = "no_savings"
         else:
-            last_price    = float(booking.metadata.get("last_evaluated_price") or 0)
-            last_eval_at  = booking.metadata.get("last_evaluated_at", "")
-            same_price    = abs(payload.current_price - last_price) < 0.01
-            recent        = last_eval_at and _seconds_since(last_eval_at) < _PATCH_COOLDOWN
+            last_price   = float(booking.metadata.get("last_evaluated_price") or 0)
+            last_eval_at = booking.metadata.get("last_evaluated_at", "")
+            same_price   = abs(payload.current_price - last_price) < 0.01
+            recent       = last_eval_at and _seconds_since(last_eval_at) < _PATCH_COOLDOWN
 
             if same_price and recent:
                 prism_skipped_reason = "duplicate_price_cooldown"
@@ -852,14 +889,15 @@ async def account(auth: tuple = Depends(require_api_key)):
     agency, api_key = auth
     ag = _agencies.get_by_key(api_key)
     return {
-        "agency":       ag.name,
-        "email":        ag.email,
-        "environment":  ag.environment,
-        "key_prefix":   api_key[:20] + "...",
-        "member_since": ag.created_at,
-        "total_calls":  ag.total_calls,
-        "last_call":    ag.last_call_at,
-        "rate_limit":   f"{_RATE_LIMIT} req / {_RATE_WINDOW}s",
+        "agency":             ag.name,
+        "email":              ag.email,
+        "environment":        ag.environment,
+        "key_prefix":         api_key[:20] + "...",
+        "member_since":       ag.created_at,
+        "total_calls":        ag.total_calls,
+        "last_call":          ag.last_call_at,
+        "rate_limit":         f"{_RATE_LIMIT} req / {_RATE_WINDOW}s",
+        "billing_configured": ag.stripe_customer_id is not None,
         "endpoints": [
             "POST   /api/v1/predict",
             "POST   /api/v1/monitor",

@@ -70,8 +70,29 @@ class Notifier:
             },
         )
 
+    def billing_error(
+        self,
+        booking: Booking,
+        fee_usd: float,
+        error: str,
+    ) -> None:
+        """
+        Fire ryde.billing_error to the agency's webhook URL when a Stripe
+        success-fee charge fails. The agency should reconcile manually.
+        """
+        if not booking.notify_webhook:
+            return
+        self._post(
+            booking.notify_webhook,
+            {
+                "event":      "ryde.billing_error",
+                "booking_id": booking.booking_id,
+                "fee_usd":    round(fee_usd, 2),
+                "error":      error,
+            },
+        )
+
     def _post(self, url: str, payload: Dict[str, Any]) -> None:
-        # Serialize once so the signature covers the exact bytes we send
         body = json.dumps(payload, default=str)
         headers = {
             "Content-Type": "application/json",

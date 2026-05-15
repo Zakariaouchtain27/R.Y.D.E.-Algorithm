@@ -34,6 +34,7 @@ class Agency:
     created_at: str
     ls_subscription_id: Optional[str] = None
     ls_order_id: Optional[str] = None
+    stripe_customer_id: Optional[str] = None
 
 
 class AgencyStore:
@@ -48,7 +49,7 @@ class AgencyStore:
             self._dict_cursor = psycopg2.extras.DictCursor
             # Connection deferred to first _execute call.  Connecting at
             # import time would block the whole Python process for up to the
-            # OS TCP timeout (~120s) if PostgreSQL isn’t ready yet.
+            # OS TCP timeout (~120s) if PostgreSQL isn't ready yet.
         else:
             from pathlib import Path
             Path(db_path).parent.mkdir(parents=True, exist_ok=True)
@@ -73,8 +74,6 @@ class AgencyStore:
         self._conn = psycopg2.connect(_DATABASE_URL)
         self._conn.autocommit = False
         self._conn.cursor_factory = self._dict_cursor
-        # Set _ready before calling _init_schema so that _execute calls
-        # inside _init_schema don’t recurse back into this method.
         self._ready = True
         self._init_schema()
         self._seed_dev_keys()
@@ -119,12 +118,14 @@ class AgencyStore:
                     last_call_at       TEXT,
                     created_at         TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     ls_subscription_id TEXT,
-                    ls_order_id        TEXT
+                    ls_order_id        TEXT,
+                    stripe_customer_id TEXT
                 )
             """)
-            # Safe migration for existing deployments that pre-date LS columns
+            # Safe migrations for existing deployments
             self._add_column_if_missing("agencies", "ls_subscription_id", "TEXT")
             self._add_column_if_missing("agencies", "ls_order_id", "TEXT")
+            self._add_column_if_missing("agencies", "stripe_customer_id", "TEXT")
             self._commit()
 
     def _add_column_if_missing(self, table: str, column: str, col_type: str) -> None:
@@ -220,6 +221,15 @@ class AgencyStore:
             self._commit()
         return self.get_by_id(agency_id)
 
+    def set_stripe_customer(self, agency_id: str, stripe_customer_id: str) -> None:
+        """Store a Stripe customer ID so success fees can be charged off-session."""
+        with self._lock:
+            self._execute(
+                "UPDATE agencies SET stripe_customer_id = ? WHERE id = ?",
+                (stripe_customer_id, agency_id),
+            )
+            self._commit()
+
     def log_call(self, api_key: str) -> None:
         now = datetime.utcnow().isoformat() + "Z"
         with self._lock:
@@ -244,6 +254,14 @@ class AgencyStore:
         with self._lock:
             row = self._execute(
                 "SELECT * FROM agencies WHERE id = ?", (agency_id,)
+            ).fetchone()
+        return self._from_row(row) if row else None
+
+    def get_by_name(self, name: str) -> Optional["Agency"]:
+        """Return the first active agency with this name. Names are unique in practice."""
+        with self._lock:
+            row = self._execute(
+                "SELECT * FROM agencies WHERE name = ? AND active = 1 LIMIT 1", (name,)
             ).fetchone()
         return self._from_row(row) if row else None
 
@@ -282,4 +300,5 @@ class AgencyStore:
             created_at=str(row["created_at"]),
             ls_subscription_id=row["ls_subscription_id"],
             ls_order_id=row["ls_order_id"],
+            stripe_customer_id=row["stripe_customer_id"],
         )
