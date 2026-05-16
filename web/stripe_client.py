@@ -24,6 +24,7 @@ class StripeClient:
         return _stripe.SetupIntent.create(
             customer=customer_id,
             payment_method_types=["card"],
+            usage="off_session",
         )
 
     def charge(
@@ -108,3 +109,35 @@ class StripeClient:
             return False, None, str(exc)
         except Exception as exc:
             return False, None, f"Unexpected billing error: {exc}"
+
+    def set_default_payment_method(self, customer_id: str, payment_method_id: str) -> None:
+        _stripe.Customer.modify(
+            customer_id,
+            invoice_settings={"default_payment_method": payment_method_id},
+        )
+
+    def get_customer_card(self, customer_id: str) -> Optional[dict]:
+        """Return simplified card details for the default payment method, or None."""
+        try:
+            customer = _stripe.Customer.retrieve(customer_id)
+            pm_id = (
+                (customer.get("invoice_settings") or {}).get("default_payment_method")
+                or customer.get("default_source")
+            )
+            if not pm_id:
+                pms = _stripe.PaymentMethod.list(customer=customer_id, type="card", limit=1)
+                if pms.data:
+                    pm_id = pms.data[0].id
+            if not pm_id:
+                return None
+            pm = _stripe.PaymentMethod.retrieve(pm_id)
+            card = pm.get("card", {})
+            return {
+                "brand":     card.get("brand", "unknown"),
+                "last4":     card.get("last4", "****"),
+                "exp_month": card.get("exp_month"),
+                "exp_year":  card.get("exp_year"),
+                "funding":   card.get("funding", ""),
+            }
+        except Exception:
+            return None

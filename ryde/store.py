@@ -269,6 +269,29 @@ class BookingStore:
                 seen[bid] = json.loads(row[1])
         return seen
 
+    def get_billing_events(self, agency: str) -> list:
+        """Return all billing audit events for this agency, newest first."""
+        with self._lock:
+            rows = self._execute(
+                """
+                SELECT booking_id, event, detail, created_at
+                FROM audit_log
+                WHERE agency = ?
+                  AND event IN ('billing_charged', 'billing_error', 'billing_skipped')
+                ORDER BY id DESC
+                """,
+                (agency,),
+            ).fetchall()
+        result = []
+        for row in rows:
+            result.append({
+                "booking_id": row[0],
+                "event":      row[1],
+                "detail":     json.loads(row[2]),
+                "timestamp":  str(row[3]),
+            })
+        return result
+
     # ------------------------------------------------------------------
     # Idempotency cache
     # ------------------------------------------------------------------

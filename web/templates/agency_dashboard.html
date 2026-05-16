@@ -6,6 +6,7 @@
   <title>R.Y.D.E. Agency Dashboard</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+  <script src="https://js.stripe.com/v3/"></script>
   <style>
     ::-webkit-scrollbar { width: 5px; height: 5px; }
     ::-webkit-scrollbar-track { background: #030712; }
@@ -153,6 +154,108 @@
       </div>
     </div>
 
+    <!-- ── Billing Summary Stats ─────────────────────────────────────── -->
+    <div>
+      <p class="text-xs text-gray-600 uppercase tracking-widest mb-3 px-0.5">Billing</p>
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+        <div class="bg-gray-900 border border-gray-800 rounded-xl p-5 fade-in">
+          <p class="text-xs text-gray-500 uppercase tracking-widest mb-1">Fees Paid — This Month</p>
+          <p class="text-2xl font-bold text-emerald-400">$<span id="bFeesMonth">&mdash;</span></p>
+          <p class="text-xs text-gray-600 mt-1">20% success fees charged</p>
+        </div>
+        <div class="bg-gray-900 border border-gray-800 rounded-xl p-5 fade-in">
+          <p class="text-xs text-gray-500 uppercase tracking-widest mb-1">Outstanding</p>
+          <p class="text-2xl font-bold text-yellow-400">$<span id="bOutstandingAmt">&mdash;</span></p>
+          <p class="text-xs text-gray-600 mt-1"><span id="bOutstandingCount">0</span> skipped — no card on file</p>
+        </div>
+        <div class="bg-gray-900 border border-gray-800 rounded-xl p-5 fade-in">
+          <p class="text-xs text-gray-500 uppercase tracking-widest mb-1">Failed — Needs Attention</p>
+          <p class="text-2xl font-bold text-red-400">$<span id="bFailedAmt">&mdash;</span></p>
+          <p class="text-xs text-gray-600 mt-1"><span id="bFailedCount">0</span> charge error(s)</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Payment Method ────────────────────────────────────────────── -->
+    <div class="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden fade-in">
+      <div class="flex items-center justify-between px-6 py-4 border-b border-gray-800">
+        <h2 class="font-semibold">Payment Method</h2>
+        <button id="cardSetupBtn" onclick="openCardSetup()"
+                class="text-xs px-3 py-1.5 border border-gray-700 hover:border-emerald-600
+                       text-gray-400 hover:text-emerald-400 rounded-lg transition-colors">
+          + Add Card
+        </button>
+      </div>
+
+      <!-- Current card display -->
+      <div id="cardDisplay" class="px-6 py-5">
+        <div id="noCard" class="flex items-center gap-3 text-yellow-500 text-xs">
+          <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                  d="M12 9v2m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/>
+          </svg>
+          No payment method on file. Add a card so success fees can be charged automatically.
+        </div>
+        <div id="hasCard" class="hidden flex items-center gap-4">
+          <div class="bg-gray-800 border border-gray-700 rounded-lg px-4 py-3 flex items-center gap-3">
+            <span id="cardBrand" class="text-xs text-gray-400 uppercase tracking-widest w-12"></span>
+            <span class="text-sm font-mono text-gray-200">&bull;&bull;&bull;&bull; <span id="cardLast4"></span></span>
+            <span class="text-xs text-gray-500">expires <span id="cardExp"></span></span>
+          </div>
+          <span class="text-xs text-emerald-500">Active</span>
+        </div>
+      </div>
+
+      <!-- Stripe card entry form (hidden until opened) -->
+      <div id="cardSetupPanel" class="hidden border-t border-gray-800 px-6 py-5">
+        <p class="text-xs text-gray-500 mb-4">Enter card details. Your card will be saved for automatic billing after each RYDE success.</p>
+        <div id="stripeCardElement"
+             class="bg-gray-800 border border-gray-700 rounded-lg px-4 py-3 mb-4"></div>
+        <p id="cardSetupError" class="text-red-400 text-xs mb-3 hidden"></p>
+        <div class="flex gap-2">
+          <button id="saveCardBtn" onclick="saveCard()"
+                  class="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 active:bg-emerald-700
+                         text-white text-xs font-semibold rounded-lg transition-colors">
+            Save Card
+          </button>
+          <button onclick="closeCardSetup()"
+                  class="px-4 py-2 border border-gray-700 hover:border-gray-500
+                         text-gray-500 hover:text-gray-300 text-xs rounded-lg transition-colors">
+            Cancel
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Billing History ───────────────────────────────────────────── -->
+    <div class="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden fade-in">
+      <div class="flex items-center justify-between px-6 py-4 border-b border-gray-800">
+        <h2 class="font-semibold">Billing History</h2>
+        <span class="text-xs text-gray-600"><span id="billCount">0</span> records</span>
+      </div>
+      <div class="overflow-x-auto">
+        <table class="w-full">
+          <thead>
+            <tr class="text-left text-xs text-gray-500 uppercase tracking-widest border-b border-gray-800/80">
+              <th class="px-6 py-3">Date</th>
+              <th class="px-6 py-3">Booking</th>
+              <th class="px-6 py-3">Net Savings</th>
+              <th class="px-6 py-3">Fee Charged</th>
+              <th class="px-6 py-3">Status</th>
+              <th class="px-6 py-3">Stripe PI</th>
+            </tr>
+          </thead>
+          <tbody id="billTbody" class="divide-y divide-gray-800/60">
+            <tr>
+              <td colspan="6" class="px-6 py-8 text-center text-gray-600 text-xs">
+                Loading billing history&hellip;
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
   </main>
 </div>
 
@@ -160,10 +263,15 @@
 // ==========================================================================
 // State
 // ==========================================================================
-let apiKey   = null;
-let chart    = null;
-let timer    = null;
+let apiKey    = null;
+let chart     = null;
+let timer     = null;
 let activeBid = null;
+
+// Stripe card setup state
+let _stripe       = null;
+let _cardEl       = null;
+let _clientSecret = null;
 
 // ==========================================================================
 // Boot
@@ -224,6 +332,7 @@ async function loadAll() {
     if (res.status === 401 || res.status === 403) { disconnect(); return; }
     render(await res.json());
   } catch (e) { console.error('dashboard load failed', e); }
+  loadBilling();
 }
 
 function scheduleRefresh() {
@@ -469,6 +578,188 @@ function ago(iso) {
     if (h < 24) return `${h}h ago`;
     return `${Math.floor(h / 24)}d ago`;
   } catch { return iso; }
+}
+
+// ==========================================================================
+// Billing
+// ==========================================================================
+async function loadBilling() {
+  try {
+    const res = await fetch('/agency-dashboard/billing', { headers: { 'X-Agency-Key': apiKey } });
+    if (!res.ok) return;
+    renderBilling(await res.json());
+  } catch (e) { console.error('billing load failed', e); }
+}
+
+function renderBilling({ summary, card, events, billing_configured }) {
+  // Summary stats
+  document.getElementById('bFeesMonth').textContent      = usd(summary.fees_this_month);
+  document.getElementById('bOutstandingAmt').textContent  = usd(summary.outstanding_amount);
+  document.getElementById('bOutstandingCount').textContent = summary.outstanding_count;
+  document.getElementById('bFailedAmt').textContent       = usd(summary.failed_amount);
+  document.getElementById('bFailedCount').textContent     = summary.failed_count;
+
+  // Payment method card
+  const setupBtn = document.getElementById('cardSetupBtn');
+  if (card) {
+    document.getElementById('noCard').classList.add('hidden');
+    document.getElementById('hasCard').classList.remove('hidden');
+    document.getElementById('cardBrand').textContent = card.brand;
+    document.getElementById('cardLast4').textContent = card.last4;
+    document.getElementById('cardExp').textContent   =
+      `${String(card.exp_month).padStart(2,'0')}/${String(card.exp_year).slice(-2)}`;
+    setupBtn.textContent = '✎ Update Card';
+  } else {
+    document.getElementById('noCard').classList.remove('hidden');
+    document.getElementById('hasCard').classList.add('hidden');
+    setupBtn.textContent = '+ Add Card';
+  }
+
+  // Billing history table
+  const tbody = document.getElementById('billTbody');
+  document.getElementById('billCount').textContent = events.length;
+
+  if (!events.length) {
+    tbody.innerHTML = `<tr><td colspan="6"
+      class="px-6 py-10 text-center text-gray-600 text-xs">
+      No billing events yet. They appear here after the first PRISM STRIKE.
+    </td></tr>`;
+    return;
+  }
+
+  tbody.innerHTML = events.map(ev => {
+    const d   = ev.detail;
+    const pi  = d.stripe_payment_intent;
+    const piLink = pi
+      ? `<a href="https://dashboard.stripe.com/payments/${pi}" target="_blank"
+              class="text-blue-400 hover:text-blue-300 font-mono text-xs underline
+                     underline-offset-2">${pi.slice(0,14)}&hellip;</a>`
+      : `<span class="text-gray-600">&mdash;</span>`;
+
+    return `
+<tr class="hover:bg-gray-800/30 transition-colors">
+  <td class="px-6 py-3.5 text-xs text-gray-500 whitespace-nowrap">${fmtDate(ev.timestamp)}</td>
+  <td class="px-6 py-3.5 font-mono text-xs text-gray-400">${ev.booking_id.slice(0,20)}&hellip;</td>
+  <td class="px-6 py-3.5 text-emerald-400">
+    ${d.net_savings != null ? '$' + parseFloat(d.net_savings).toFixed(2) : '&mdash;'}
+  </td>
+  <td class="px-6 py-3.5">
+    ${d.fee_usd != null ? '$' + parseFloat(d.fee_usd).toFixed(2) : '&mdash;'}
+  </td>
+  <td class="px-6 py-3.5">${billBadge(ev.event)}</td>
+  <td class="px-6 py-3.5">${piLink}</td>
+</tr>`;
+  }).join('');
+}
+
+function billBadge(event) {
+  const MAP = {
+    billing_charged: ['bg-emerald-950 text-emerald-400 border-emerald-800', 'Charged'],
+    billing_error:   ['bg-red-950 text-red-400 border-red-800',             'Failed'],
+    billing_skipped: ['bg-yellow-950 text-yellow-400 border-yellow-800',    'Skipped'],
+  };
+  const [cls, label] = MAP[event] || ['bg-gray-800 text-gray-500 border-gray-700', event];
+  return `<span class="inline-flex items-center px-2 py-0.5 rounded-md border
+                       text-xs font-mono ${cls}">${label}</span>`;
+}
+
+function fmtDate(iso) {
+  try {
+    return new Date(iso).toLocaleString('en-US', {
+      month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'
+    });
+  } catch { return iso; }
+}
+
+// ==========================================================================
+// Card setup (Stripe SetupIntent)
+// ==========================================================================
+async function openCardSetup() {
+  const panel = document.getElementById('cardSetupPanel');
+  const err   = document.getElementById('cardSetupError');
+  err.classList.add('hidden');
+
+  // Fetch SetupIntent from backend
+  let si;
+  try {
+    const res = await fetch('/agency-dashboard/billing/setup-intent', {
+      method: 'POST',
+      headers: { 'X-Agency-Key': apiKey },
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      err.textContent = body.detail || 'Could not initialise card setup — is STRIPE_SECRET_KEY configured?';
+      err.classList.remove('hidden');
+      panel.classList.remove('hidden');
+      return;
+    }
+    si = await res.json();
+  } catch (e) {
+    err.textContent = 'Network error contacting billing endpoint.';
+    err.classList.remove('hidden');
+    panel.classList.remove('hidden');
+    return;
+  }
+
+  _clientSecret = si.client_secret;
+  _stripe = Stripe(si.publishable_key);
+
+  const elements = _stripe.elements();
+  _cardEl = elements.create('card', {
+    style: {
+      base: {
+        color: '#f9fafb',
+        fontFamily: 'ui-monospace, monospace',
+        fontSize: '14px',
+        '::placeholder': { color: '#4b5563' },
+      },
+      invalid: { color: '#f87171' },
+    },
+  });
+  _cardEl.mount('#stripeCardElement');
+  panel.classList.remove('hidden');
+  document.getElementById('stripeCardElement').scrollIntoView({ behavior: 'smooth', block: 'center' });
+}
+
+function closeCardSetup() {
+  document.getElementById('cardSetupPanel').classList.add('hidden');
+  document.getElementById('cardSetupError').classList.add('hidden');
+  if (_cardEl) { _cardEl.destroy(); _cardEl = null; }
+  _clientSecret = null;
+  _stripe = null;
+}
+
+async function saveCard() {
+  if (!_stripe || !_cardEl || !_clientSecret) return;
+  const btn = document.getElementById('saveCardBtn');
+  const err = document.getElementById('cardSetupError');
+  btn.disabled = true;
+  btn.textContent = 'Saving…';
+  err.classList.add('hidden');
+
+  const { setupIntent, error } = await _stripe.confirmCardSetup(_clientSecret, {
+    payment_method: { card: _cardEl },
+  });
+
+  if (error) {
+    err.textContent = error.message;
+    err.classList.remove('hidden');
+    btn.disabled = false;
+    btn.textContent = 'Save Card';
+    return;
+  }
+
+  // Tell backend to set this PM as the default
+  try {
+    await fetch('/agency-dashboard/billing/setup-confirm', {
+      method:  'POST',
+      headers: { 'X-Agency-Key': apiKey, 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ payment_method_id: setupIntent.payment_method }),
+    });
+  } catch (e) { /* non-fatal — card is attached, default will be resolved on next charge */ }
+
+  closeCardSetup();
+  loadBilling();  // refresh card display
 }
 </script>
 </body>

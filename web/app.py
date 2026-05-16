@@ -367,6 +367,121 @@ async def agency_dashboard_price_history(
     return {"route_key": route_key, "points": points, "count": len(points)}
 
 
+@app.post("/agency-dashboard/billing/setup-intent")
+async def billing_setup_intent(
+    x_agency_key: Optional[str] = Header(default=None),
+    x_api_key:    Optional[str] = Header(default=None),
+):
+    """Create (or reuse) a Stripe customer for this agency and return a SetupIntent client_secret."""
+    agency_obj = _require_agency_key(x_agency_key, x_api_key)
+    stripe_client = _get_stripe()
+
+    if not agency_obj.stripe_customer_id:
+        customer = await asyncio.to_thread(
+            stripe_client.create_customer, agency_obj.email, agency_obj.name
+        )
+        _agencies.set_stripe_customer(agency_obj.id, customer.id)
+        agency_obj = _agencies.get_by_id(agency_obj.id)
+
+    setup_intent = await asyncio.to_thread(
+        stripe_client.create_setup_intent, agency_obj.stripe_customer_id
+    )
+    card = await asyncio.to_thread(
+        stripe_client.get_customer_card, agency_obj.stripe_customer_id
+    )
+    return {
+        "client_secret":   setup_intent.client_secret,
+        "publishable_key": os.getenv("STRIPE_PUBLISHABLE_KEY", ""),
+        "has_card":        card is not None,
+        "card":            card,
+    }
+
+
+@app.post("/agency-dashboard/billing/setup-confirm")
+async def billing_setup_confirm(
+    request: Request,
+    x_agency_key: Optional[str] = Header(default=None),
+    x_api_key:    Optional[str] = Header(default=None),
+):
+    """Set the confirmed payment method as the agency's default for off-session charges."""
+    agency_obj = _require_agency_key(x_agency_key, x_api_key)
+    body = await request.json()
+    payment_method_id = body.get("payment_method_id")
+    if not payment_method_id:
+        raise HTTPException(status_code=422, detail="payment_method_id required")
+    if not agency_obj.stripe_customer_id:
+        raise HTTPException(status_code=400, detail="No Stripe customer on file.")
+    stripe_client = _get_stripe()
+    await asyncio.to_thread(
+        stripe_client.set_default_payment_method,
+        agency_obj.stripe_customer_id,
+        payment_method_id,
+    )
+    return {"ok": True}
+
+
+@app.get("/agency-dashboard/billing")
+async def agency_billing(
+    x_agency_key: Optional[str] = Header(default=None),
+    x_api_key:    Optional[str] = Header(default=None),
+):
+    """Billing history + summary stats pulled from the audit log."""
+    from datetime import timezone
+    agency_obj = _require_agency_key(x_agency_key, x_api_key)
+    agency = agency_obj.name
+
+    events = await asyncio.to_thread(_bookings.get_billing_events, agency)
+
+    card = None
+    if agency_obj.stripe_customer_id:
+        try:
+            card = await asyncio.to_thread(
+                _get_stripe().get_customer_card, agency_obj.stripe_customer_id
+            )
+        except Exception:
+            pass
+
+    now         = datetime.now(timezone.utc)
+    month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+    fees_this_month    = 0.0
+    outstanding_amount = 0.0
+    outstanding_count  = 0
+    failed_amount      = 0.0
+    failed_count       = 0
+
+    for ev in events:
+        detail = ev["detail"]
+        try:
+            ts = datetime.fromisoformat(ev["timestamp"].rstrip("Z")).replace(tzinfo=timezone.utc)
+        except Exception:
+            ts = None
+
+        if ev["event"] == "billing_charged":
+            if ts and ts >= month_start:
+                fees_this_month += float(detail.get("fee_usd", 0))
+        elif ev["event"] == "billing_skipped":
+            outstanding_amount += float(detail.get("fee_usd", 0))
+            outstanding_count  += 1
+        elif ev["event"] == "billing_error":
+            failed_amount += float(detail.get("fee_usd", 0))
+            failed_count  += 1
+
+    return {
+        "agency":              agency,
+        "billing_configured":  agency_obj.stripe_customer_id is not None,
+        "card":                card,
+        "summary": {
+            "fees_this_month":    round(fees_this_month, 2),
+            "outstanding_amount": round(outstanding_amount, 2),
+            "outstanding_count":  outstanding_count,
+            "failed_amount":      round(failed_amount, 2),
+            "failed_count":       failed_count,
+        },
+        "events": events,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Free-tier self-serve signup
 # ---------------------------------------------------------------------------
