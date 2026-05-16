@@ -44,7 +44,7 @@ class ClientStore:
         client_id: str,
         name: str,
         email: str,
-        stripe_customer_id: str,
+        stripe_customer_id: Optional[str],
         booking_data: dict,
     ):
         with self._lock:
@@ -71,6 +71,19 @@ class ClientStore:
             if d["booking_data"].get("booking_ref") == booking_ref:
                 return d
         return None
+
+    def update_stripe_customer(self, client_id: str, stripe_customer_id: str) -> None:
+        with self._lock:
+            self._conn.execute(
+                "UPDATE clients SET stripe_customer_id = ? WHERE client_id = ?",
+                (stripe_customer_id, client_id),
+            )
+            self._conn.commit()
+
+    def delete_client(self, client_id: str) -> None:
+        with self._lock:
+            self._conn.execute("DELETE FROM clients WHERE client_id = ?", (client_id,))
+            self._conn.commit()
 
     def save_payment_method(self, client_id: str, payment_method_id: str):
         with self._lock:

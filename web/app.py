@@ -522,29 +522,93 @@ async def signup_submit(
 
 @app.get("/register", response_class=HTMLResponse)
 async def register_form(request: Request):
-    return templates.TemplateResponse(request, "register.html")
+    # #7: surface a clean 503 rather than crashing later if Stripe is unconfigured
+    if not os.getenv("STRIPE_SECRET_KEY"):
+        return templates.TemplateResponse(
+            request, "register.html",
+            {"error": "Online registration is temporarily unavailable. Please contact support."},
+            status_code=503,
+        )
+    return templates.TemplateResponse(request, "register.html", {"error": ""})
 
 
 @app.post("/register")
 async def register_submit(
+    request: Request,
     name: str = Form(...), email: str = Form(...),
     origin: str = Form(...), destination: str = Form(...),
     departure_date: str = Form(...), original_price: float = Form(...),
     cancellation_fee: float = Form(...), booking_ref: str = Form(...),
     seat_preference: str = Form("cheapest"),
 ):
-    client_id = str(uuid.uuid4())
-    customer = _get_stripe().create_customer(email=email, name=name)
-    _clients.create_client(
-        client_id=client_id, name=name, email=email,
-        stripe_customer_id=customer.id,
-        booking_data={
-            "origin": origin.upper().strip(), "destination": destination.upper().strip(),
-            "departure_date": departure_date, "original_price": original_price,
-            "cancellation_fee": cancellation_fee, "booking_ref": booking_ref.strip(),
-            "seat_preference": seat_preference,
-        },
-    )
+    # #7: re-check key on POST so a mid-deploy config gap also returns a clean error
+    if not os.getenv("STRIPE_SECRET_KEY"):
+        return templates.TemplateResponse(
+            request, "register.html",
+            {"error": "Payment service is temporarily unavailable. Please try again later."},
+            status_code=503,
+        )
+
+    # #11: validate departure_date format and future-date constraint
+    try:
+        dep = datetime.strptime(departure_date, "%Y-%m-%d")
+    except ValueError:
+        return templates.TemplateResponse(
+            request, "register.html",
+            {"error": "Invalid departure date — please use YYYY-MM-DD format."},
+            status_code=422,
+        )
+    if dep.date() <= datetime.now().date():
+        return templates.TemplateResponse(
+            request, "register.html",
+            {"error": "Departure date must be in the future."},
+            status_code=422,
+        )
+
+    # Bottom line #2: write to the DB first, then create the Stripe customer.
+    # If Stripe fails after a successful DB write we delete the local record and
+    # return an error — no orphan either side.  The previous order (Stripe first)
+    # left orphaned Stripe customers whenever the subsequent DB write failed.
+    client_id    = str(uuid.uuid4())
+    booking_data = {
+        "origin":           origin.upper().strip(),
+        "destination":      destination.upper().strip(),
+        "departure_date":   departure_date,
+        "original_price":   original_price,
+        "cancellation_fee": cancellation_fee,
+        "booking_ref":      booking_ref.strip(),
+        "seat_preference":  seat_preference,
+    }
+    try:
+        _clients.create_client(
+            client_id=client_id,
+            name=name.strip(),
+            email=email.strip().lower(),
+            stripe_customer_id=None,
+            booking_data=booking_data,
+        )
+    except Exception:
+        log.error("DB write failed during B2C registration", extra={"email": email})
+        return templates.TemplateResponse(
+            request, "register.html",
+            {"error": "Registration failed. Please try again."},
+            status_code=500,
+        )
+
+    try:
+        customer = await asyncio.to_thread(
+            _get_stripe().create_customer, email.strip().lower(), name.strip()
+        )
+        _clients.update_stripe_customer(client_id, customer.id)
+    except Exception:
+        _clients.delete_client(client_id)
+        log.error("Stripe customer creation failed during B2C registration", extra={"email": email})
+        return templates.TemplateResponse(
+            request, "register.html",
+            {"error": "Payment service is temporarily unavailable. Please try again later."},
+            status_code=503,
+        )
+
     return RedirectResponse(f"/setup-payment/{client_id}", status_code=303)
 
 

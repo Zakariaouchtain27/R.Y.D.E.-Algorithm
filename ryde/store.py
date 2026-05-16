@@ -11,6 +11,20 @@ from .models import Booking, Passenger
 _DATABASE_URL = os.getenv("DATABASE_URL", "")
 
 
+class _AuditEncoder(json.JSONEncoder):
+    """Safely serialise audit detail dicts that may contain datetime / Decimal objects."""
+    def default(self, obj):
+        if isinstance(obj, datetime):
+            return obj.isoformat()
+        try:
+            from decimal import Decimal
+            if isinstance(obj, Decimal):
+                return float(obj)
+        except ImportError:
+            pass
+        return str(obj)
+
+
 class BookingStore:
     """
     SQLite-backed store for local dev; PostgreSQL in production.
@@ -219,7 +233,7 @@ class BookingStore:
         with self._lock:
             self._execute(
                 "INSERT INTO audit_log (booking_id, agency, event, detail) VALUES (?, ?, ?, ?)",
-                (booking_id, agency, event, json.dumps(detail)),
+                (booking_id, agency, event, json.dumps(detail, cls=_AuditEncoder)),
             )
             self._commit()
 

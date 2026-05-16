@@ -180,6 +180,11 @@ def _seconds_since(iso_str: str) -> float:
         return float("inf")
 
 
+def _can_rebook(original_price: float, current_price: float, cancellation_fee: float) -> bool:
+    """True when rebooking yields positive net savings after the cancellation fee."""
+    return (original_price - current_price - cancellation_fee) > 0
+
+
 def _charge_success_fee_sync(
     booking: Booking,
     agency_name: str,
@@ -209,6 +214,19 @@ def _charge_success_fee_sync(
         )
         _bookings.log_audit(booking.booking_id, agency_name, "billing_skipped", {
             "reason":      "no_stripe_customer",
+            "fee_usd":     fee,
+            "net_savings": round(net_savings, 2),
+            "skipped_at":  now_iso,
+        })
+        return
+
+    if int(fee * 100) < _stripe_client.MIN_CHARGE_CENTS:
+        log.info(
+            "Success fee $%.2f for booking %s is below Stripe minimum — skipping charge",
+            fee, booking.booking_id,
+        )
+        _bookings.log_audit(booking.booking_id, agency_name, "billing_skipped", {
+            "reason":      "below_minimum_charge",
             "fee_usd":     fee,
             "net_savings": round(net_savings, 2),
             "skipped_at":  now_iso,
@@ -304,10 +322,13 @@ def _run_prism_sync(
 
     # Charge 20% success fee on every STRIKE.
     # Signal API mode: agency acts on the webhook; we bill at decision time.
-    if decision.action == RYDEAction.STRIKE:
-        net_savings = booking.original_price - current_price - booking.cancellation_fee
-        if net_savings > 0:
-            _charge_success_fee_sync(booking, agency, net_savings)
+    if decision.action == RYDEAction.STRIKE and _can_rebook(
+        booking.original_price, current_price, booking.cancellation_fee
+    ):
+        _charge_success_fee_sync(
+            booking, agency,
+            booking.original_price - current_price - booking.cancellation_fee,
+        )
 
     return decision.action.value
 
@@ -664,13 +685,13 @@ async def submit_monitor(
     })
 
     prism_triggered = False
-    if payload.current_price is not None:
-        net_savings = payload.original_price - payload.current_price - payload.cancellation_fee
-        if net_savings > 0:
-            asyncio.create_task(_trigger_prism(
-                tracking_id, payload.current_price, payload.seats_remaining, agency,
-            ))
-            prism_triggered = True
+    if payload.current_price is not None and _can_rebook(
+        payload.original_price, payload.current_price, payload.cancellation_fee
+    ):
+        asyncio.create_task(_trigger_prism(
+            tracking_id, payload.current_price, payload.seats_remaining, agency,
+        ))
+        prism_triggered = True
 
     response = {
         "tracking_id":      tracking_id,
@@ -808,8 +829,7 @@ async def patch_booking(
     prism_triggered = False
     prism_skipped_reason = None
     if payload.current_price is not None:
-        net_savings = booking.original_price - payload.current_price - booking.cancellation_fee
-        if net_savings <= 0:
+        if not _can_rebook(booking.original_price, payload.current_price, booking.cancellation_fee):
             prism_skipped_reason = "no_savings"
         else:
             last_price   = float(booking.metadata.get("last_evaluated_price") or 0)
