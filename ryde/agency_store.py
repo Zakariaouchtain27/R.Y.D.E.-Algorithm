@@ -20,6 +20,16 @@ from typing import List, Optional
 
 _DATABASE_URL = os.getenv("DATABASE_URL", "")
 
+# ---------------------------------------------------------------------------
+# Subscription tier limits
+# ---------------------------------------------------------------------------
+
+TIER_LIMITS: dict = {
+    "free":    {"max_bookings": 3,   "rate_limit": 20},
+    "starter": {"max_bookings": 25,  "rate_limit": 60},
+    "pro":     {"max_bookings": -1,  "rate_limit": 120},  # -1 = unlimited
+}
+
 
 @dataclass
 class Agency:
@@ -35,21 +45,19 @@ class Agency:
     ls_subscription_id: Optional[str] = None
     ls_order_id: Optional[str] = None
     stripe_customer_id: Optional[str] = None
+    subscription_tier: str = "free"
 
 
 class AgencyStore:
     def __init__(self, db_path: str = "ryde.db"):
-        self._lock  = RLock()   # RLock: same thread can re-enter during lazy init
+        self._lock  = RLock()
         self._pg    = bool(_DATABASE_URL)
-        self._ready = False     # True after connection + schema are initialised
+        self._ready = False
         self._conn  = None
 
         if self._pg:
             import psycopg2.extras
             self._dict_cursor = psycopg2.extras.DictCursor
-            # Connection deferred to first _execute call.  Connecting at
-            # import time would block the whole Python process for up to the
-            # OS TCP timeout (~120s) if PostgreSQL isn't ready yet.
         else:
             from pathlib import Path
             Path(db_path).parent.mkdir(parents=True, exist_ok=True)
@@ -60,13 +68,7 @@ class AgencyStore:
             self._seed_dev_keys()
             self._ready = True
 
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
-
     def _ensure_ready(self) -> None:
-        """Connect to PostgreSQL and init schema on first use.
-        Must be called while holding self._lock."""
         if self._ready:
             return
         import psycopg2
@@ -100,10 +102,6 @@ class AgencyStore:
             return f"INSERT INTO {table} ({col_str}) VALUES ({ph}) ON CONFLICT DO NOTHING"
         return f"INSERT OR IGNORE INTO {table} ({col_str}) VALUES ({ph})"
 
-    # ------------------------------------------------------------------
-    # Schema
-    # ------------------------------------------------------------------
-
     def _init_schema(self) -> None:
         with self._lock:
             self._execute("""
@@ -119,17 +117,17 @@ class AgencyStore:
                     created_at         TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     ls_subscription_id TEXT,
                     ls_order_id        TEXT,
-                    stripe_customer_id TEXT
+                    stripe_customer_id TEXT,
+                    subscription_tier  TEXT DEFAULT 'free'
                 )
             """)
-            # Safe migrations for existing deployments
             self._add_column_if_missing("agencies", "ls_subscription_id", "TEXT")
             self._add_column_if_missing("agencies", "ls_order_id", "TEXT")
             self._add_column_if_missing("agencies", "stripe_customer_id", "TEXT")
+            self._add_column_if_missing("agencies", "subscription_tier", "TEXT DEFAULT 'free'")
             self._commit()
 
     def _add_column_if_missing(self, table: str, column: str, col_type: str) -> None:
-        """Idempotent ALTER TABLE — safe to call on every startup."""
         if self._pg:
             self._execute(
                 f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {col_type}"
@@ -138,7 +136,7 @@ class AgencyStore:
             try:
                 self._execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
             except Exception:
-                pass  # column already exists in SQLite
+                pass
 
     def _seed_dev_keys(self) -> None:
         seeds = [
@@ -151,19 +149,11 @@ class AgencyStore:
                 self._execute(sql, (agency_id, name, email, key, "test"))
             self._commit()
 
-    # ------------------------------------------------------------------
-    # Key generation
-    # ------------------------------------------------------------------
-
     @staticmethod
     def generate_key(name: str, environment: str = "test") -> str:
         slug = re.sub(r"[^a-z0-9]", "", name.lower())[:12]
         token = secrets.token_hex(16)
         return f"ryde_{environment}_{slug}_{token}"
-
-    # ------------------------------------------------------------------
-    # Write
-    # ------------------------------------------------------------------
 
     def create_agency(self, name: str, email: str, environment: str = "test") -> "Agency":
         agency_id = str(uuid.uuid4())
@@ -184,8 +174,8 @@ class AgencyStore:
         environment: str = "live",
         ls_subscription_id: str = "",
         ls_order_id: str = "",
+        subscription_tier: str = "free",
     ) -> "Agency":
-        """Create an agency from a LemonSqueezy subscription event."""
         agency_id = str(uuid.uuid4())
         api_key   = self.generate_key(name, environment)
         now       = datetime.utcnow().isoformat() + "Z"
@@ -193,10 +183,12 @@ class AgencyStore:
             self._execute(
                 """
                 INSERT INTO agencies
-                  (id, name, email, api_key, environment, created_at, ls_subscription_id, ls_order_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                  (id, name, email, api_key, environment, created_at,
+                   ls_subscription_id, ls_order_id, subscription_tier)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (agency_id, name, email, api_key, environment, now, ls_subscription_id, ls_order_id),
+                (agency_id, name, email, api_key, environment, now,
+                 ls_subscription_id, ls_order_id, subscription_tier),
             )
             self._commit()
         return self.get_by_id(agency_id)  # type: ignore
@@ -222,11 +214,20 @@ class AgencyStore:
         return self.get_by_id(agency_id)
 
     def set_stripe_customer(self, agency_id: str, stripe_customer_id: str) -> None:
-        """Store a Stripe customer ID so success fees can be charged off-session."""
         with self._lock:
             self._execute(
                 "UPDATE agencies SET stripe_customer_id = ? WHERE id = ?",
                 (stripe_customer_id, agency_id),
+            )
+            self._commit()
+
+    def set_subscription_tier(self, agency_id: str, tier: str) -> None:
+        """Update the subscription tier for an agency (free / starter / pro)."""
+        tier = tier if tier in TIER_LIMITS else "free"
+        with self._lock:
+            self._execute(
+                "UPDATE agencies SET subscription_tier = ? WHERE id = ?",
+                (tier, agency_id),
             )
             self._commit()
 
@@ -238,10 +239,6 @@ class AgencyStore:
                 (now, api_key),
             )
             self._commit()
-
-    # ------------------------------------------------------------------
-    # Read
-    # ------------------------------------------------------------------
 
     def get_by_key(self, api_key: str) -> Optional["Agency"]:
         with self._lock:
@@ -258,7 +255,6 @@ class AgencyStore:
         return self._from_row(row) if row else None
 
     def get_by_name(self, name: str) -> Optional["Agency"]:
-        """Return the first active agency with this name. Names are unique in practice."""
         with self._lock:
             row = self._execute(
                 "SELECT * FROM agencies WHERE name = ? AND active = 1 LIMIT 1", (name,)
@@ -301,4 +297,5 @@ class AgencyStore:
             ls_subscription_id=row["ls_subscription_id"],
             ls_order_id=row["ls_order_id"],
             stripe_customer_id=row["stripe_customer_id"],
+            subscription_tier=row["subscription_tier"] or "free",
         )
