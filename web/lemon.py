@@ -44,7 +44,6 @@ def _verify_ls_signature(body: bytes, signature: str) -> bool:
 
 
 def _tier_from_variant(variant_name: str) -> str:
-    """Derive subscription tier from LemonSqueezy variant name."""
     v = (variant_name or "").lower()
     if "pro" in v:
         return "pro"
@@ -75,29 +74,24 @@ async def ls_webhook(request: Request):
     log.info("LemonSqueezy event received", extra={"event": event, "ls_sub": ls_subscription_id})
 
     if event == "subscription_created":
-        _on_subscription_created(ls_subscription_id, attrs)
-
+        await _on_subscription_created(ls_subscription_id, attrs)
     elif event == "subscription_updated":
-        _on_subscription_updated(ls_subscription_id, attrs)
-
+        await _on_subscription_updated(ls_subscription_id, attrs)
     elif event == "subscription_payment_failed":
-        _on_payment_failed(ls_subscription_id)
-
+        await _on_payment_failed(ls_subscription_id)
     elif event == "subscription_payment_recovery":
-        _on_payment_recovered(ls_subscription_id)
-
+        await _on_payment_recovered(ls_subscription_id)
     elif event in ("subscription_cancelled", "subscription_expired"):
-        _on_subscription_cancelled(ls_subscription_id)
-
+        await _on_subscription_cancelled(ls_subscription_id)
     elif event == "subscription_resumed":
-        _on_subscription_resumed(ls_subscription_id)
+        await _on_subscription_resumed(ls_subscription_id)
 
     return {"ok": True}
 
 
 @router.get("/api/welcome-status")
 async def welcome_status(order_id: str):
-    agency = _agencies.get_by_ls_order(order_id)
+    agency = await _agencies.get_by_ls_order(order_id)
     if not agency:
         return JSONResponse({"ready": False})
     return JSONResponse({
@@ -111,10 +105,10 @@ async def welcome_status(order_id: str):
 
 
 # ---------------------------------------------------------------------------
-# Event handlers
+# Async event handlers
 # ---------------------------------------------------------------------------
 
-def _on_subscription_created(ls_subscription_id: str, attrs: dict) -> None:
+async def _on_subscription_created(ls_subscription_id: str, attrs: dict) -> None:
     ls_order_id    = str(attrs.get("order_id", ""))
     customer_name  = attrs.get("user_name") or "Agency"
     customer_email = attrs.get("user_email", "")
@@ -122,7 +116,7 @@ def _on_subscription_created(ls_subscription_id: str, attrs: dict) -> None:
     environment    = "test" if "test" in variant_name.lower() or "sandbox" in variant_name.lower() else "live"
     tier           = _tier_from_variant(variant_name)
 
-    agency = _agencies.create_agency_ls(
+    agency = await _agencies.create_agency_ls(
         name=customer_name,
         email=customer_email,
         environment=environment,
@@ -136,44 +130,43 @@ def _on_subscription_created(ls_subscription_id: str, attrs: dict) -> None:
     )
 
 
-def _on_subscription_updated(ls_subscription_id: str, attrs: dict) -> None:
-    """Handle plan upgrades/downgrades by re-deriving the tier from the variant name."""
-    agency = _agencies.get_by_ls_subscription(ls_subscription_id)
+async def _on_subscription_updated(ls_subscription_id: str, attrs: dict) -> None:
+    agency = await _agencies.get_by_ls_subscription(ls_subscription_id)
     if not agency:
         return
     variant_name = attrs.get("variant_name") or ""
     new_tier = _tier_from_variant(variant_name)
     if new_tier != agency.subscription_tier:
-        _agencies.set_subscription_tier(agency.id, new_tier)
+        await _agencies.set_subscription_tier(agency.id, new_tier)
         log.info(
             "Agency tier updated",
             extra={"agency": agency.name, "old": agency.subscription_tier, "new": new_tier},
         )
 
 
-def _on_payment_failed(ls_subscription_id: str) -> None:
-    agency = _agencies.get_by_ls_subscription(ls_subscription_id)
+async def _on_payment_failed(ls_subscription_id: str) -> None:
+    agency = await _agencies.get_by_ls_subscription(ls_subscription_id)
     if agency:
-        _agencies.revoke(agency.id)
+        await _agencies.revoke(agency.id)
         log.info("Agency key suspended (payment failed)", extra={"agency": agency.name})
 
 
-def _on_payment_recovered(ls_subscription_id: str) -> None:
-    agency = _agencies.get_by_ls_subscription(ls_subscription_id)
+async def _on_payment_recovered(ls_subscription_id: str) -> None:
+    agency = await _agencies.get_by_ls_subscription(ls_subscription_id)
     if agency:
-        _agencies.reactivate(agency.id)
+        await _agencies.reactivate(agency.id)
         log.info("Agency key reactivated (payment recovered)", extra={"agency": agency.name})
 
 
-def _on_subscription_cancelled(ls_subscription_id: str) -> None:
-    agency = _agencies.get_by_ls_subscription(ls_subscription_id)
+async def _on_subscription_cancelled(ls_subscription_id: str) -> None:
+    agency = await _agencies.get_by_ls_subscription(ls_subscription_id)
     if agency:
-        _agencies.revoke(agency.id)
+        await _agencies.revoke(agency.id)
         log.info("Agency key revoked (subscription cancelled/expired)", extra={"agency": agency.name})
 
 
-def _on_subscription_resumed(ls_subscription_id: str) -> None:
-    agency = _agencies.get_by_ls_subscription(ls_subscription_id)
+async def _on_subscription_resumed(ls_subscription_id: str) -> None:
+    agency = await _agencies.get_by_ls_subscription(ls_subscription_id)
     if agency:
-        _agencies.reactivate(agency.id)
+        await _agencies.reactivate(agency.id)
         log.info("Agency key reactivated (subscription resumed)", extra={"agency": agency.name})

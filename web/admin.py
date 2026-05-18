@@ -46,18 +46,10 @@ def _agency_dict(a) -> dict:
     }
 
 
-# ---------------------------------------------------------------------------
-# Dashboard (no auth — JS handles the secret client-side)
-# ---------------------------------------------------------------------------
-
 @router.get("/", response_class=HTMLResponse)
 async def admin_dashboard(request: Request):
     return templates.TemplateResponse(request, "admin.html")
 
-
-# ---------------------------------------------------------------------------
-# Agency CRUD
-# ---------------------------------------------------------------------------
 
 class CreateAgencyBody(BaseModel):
     name:        str = Field(..., min_length=2)
@@ -67,12 +59,12 @@ class CreateAgencyBody(BaseModel):
 
 @router.get("/agencies", dependencies=[Depends(require_admin)])
 async def list_agencies():
-    return [_agency_dict(a) for a in _agencies.list_agencies()]
+    return [_agency_dict(a) for a in await _agencies.list_agencies()]
 
 
 @router.post("/agencies", dependencies=[Depends(require_admin)], status_code=201)
 async def create_agency(body: CreateAgencyBody):
-    agency = _agencies.create_agency(
+    agency = await _agencies.create_agency(
         name=body.name,
         email=body.email,
         environment=body.environment,
@@ -82,23 +74,23 @@ async def create_agency(body: CreateAgencyBody):
 
 @router.delete("/agencies/{agency_id}", dependencies=[Depends(require_admin)])
 async def revoke_agency(agency_id: str):
-    if not _agencies.get_by_id(agency_id):
+    if not await _agencies.get_by_id(agency_id):
         raise HTTPException(status_code=404, detail="Agency not found.")
-    _agencies.revoke(agency_id)
+    await _agencies.revoke(agency_id)
     return {"ok": True}
 
 
 @router.post("/agencies/{agency_id}/reactivate", dependencies=[Depends(require_admin)])
 async def reactivate_agency(agency_id: str):
-    if not _agencies.get_by_id(agency_id):
+    if not await _agencies.get_by_id(agency_id):
         raise HTTPException(status_code=404, detail="Agency not found.")
-    _agencies.reactivate(agency_id)
+    await _agencies.reactivate(agency_id)
     return {"ok": True}
 
 
 @router.post("/agencies/{agency_id}/regenerate", dependencies=[Depends(require_admin)])
 async def regenerate_key(agency_id: str):
-    agency = _agencies.regenerate_key(agency_id)
+    agency = await _agencies.regenerate_key(agency_id)
     if not agency:
         raise HTTPException(status_code=404, detail="Agency not found.")
     return {"ok": True, "api_key": agency.api_key}

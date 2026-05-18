@@ -58,11 +58,11 @@ _bookings = BookingStore(_db_path)
 _agencies = AgencyStore(_db_path)
 _engine   = PRISMEngine(_db_path)
 _notifier = Notifier()
-_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="prism")
+_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="prism")
 
 _EVAL_INTERVAL = {"far": 3600, "close": 1800, "urgent": 900}
 _PATCH_COOLDOWN = 300
-_RATE_WINDOW = 60
+_RATE_WINDOW    = 60
 
 
 def _scan_interval(days: int) -> int:
@@ -74,7 +74,7 @@ def _scan_interval(days: int) -> int:
 
 
 # ---------------------------------------------------------------------------
-# Tier-aware rate limiting
+# Tier-aware in-memory rate limiting
 # ---------------------------------------------------------------------------
 
 _call_log: dict = defaultdict(list)
@@ -82,7 +82,7 @@ _call_log: dict = defaultdict(list)
 
 def _check_rate(api_key: str, tier: str = "free") -> None:
     limit = TIER_LIMITS.get(tier, TIER_LIMITS["free"])["rate_limit"]
-    now = time.monotonic()
+    now   = time.monotonic()
     _call_log[api_key] = [t for t in _call_log[api_key] if now - t < _RATE_WINDOW]
     if len(_call_log[api_key]) >= limit:
         raise HTTPException(
@@ -108,19 +108,19 @@ async def require_api_key(
             detail="Missing X-Agency-Key header.",
             headers={"WWW-Authenticate": "ApiKey"},
         )
-    agency = _agencies.get_by_key(key)
+    agency = await _agencies.get_by_key(key)
     if not agency:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Invalid or revoked API key.",
         )
     _check_rate(key, agency.subscription_tier)
-    _agencies.log_call(key)
+    await _agencies.log_call(key)
     return agency.name, key, agency.subscription_tier
 
 
 # ---------------------------------------------------------------------------
-# PRISM evaluation helpers
+# PRISM pipeline helpers
 # ---------------------------------------------------------------------------
 
 def _seconds_since(iso_str: str) -> float:
@@ -135,13 +135,19 @@ def _can_rebook(original_price: float, current_price: float, cancellation_fee: f
     return (original_price - current_price - cancellation_fee) > 0
 
 
-def _run_prism_sync(
+def _cpu_evaluate_prism(booking: Booking, snapshot: PriceSnapshot):
+    """Pure CPU — no I/O. Safe to run in an executor."""
+    return _engine.evaluate(booking, snapshot)
+
+
+async def _trigger_prism(
     booking_id: str,
     current_price: float,
     seats_remaining: int,
     agency: str,
 ) -> str:
-    booking = _bookings.get_by_id(booking_id)
+    """Async coordinator: DB fetch → CPU evaluate in executor → DB write → notify."""
+    booking = await _bookings.get_by_id(booking_id)
     if not booking:
         log.error("PRISM: booking %s not found", booking_id)
         return "error"
@@ -154,10 +160,14 @@ def _run_prism_sync(
         fare_id="agency-provided",
         source="b2b_api",
     )
+
     try:
-        decision = _engine.evaluate(booking, snapshot)
+        loop     = asyncio.get_event_loop()
+        decision = await loop.run_in_executor(
+            _executor, _cpu_evaluate_prism, booking, snapshot
+        )
     except Exception as exc:
-        log.error("PRISM evaluation failed [%s]: %s", booking_id, exc)
+        log.error("PRISM evaluation failed [%s]: %s", booking_id, exc, exc_info=True)
         return "error"
 
     log.info(
@@ -168,7 +178,7 @@ def _run_prism_sync(
 
     now_iso = datetime.utcnow().isoformat() + "Z"
 
-    _bookings.log_audit(booking_id, agency, "decision", {
+    await _bookings.log_audit(booking_id, agency, "decision", {
         "action":           decision.action.value,
         "confidence_score": decision.confidence_score,
         "net_savings":      round(decision.net_savings, 2),
@@ -180,41 +190,28 @@ def _run_prism_sync(
 
     booking.metadata["last_evaluated_price"] = current_price
     booking.metadata["last_evaluated_at"]    = now_iso
-    _bookings.upsert(booking)
+    await _bookings.upsert(booking)
 
     if decision.action in (RYDEAction.STRIKE, RYDEAction.PHANTOM_HOLD):
-        # Load the agency's notification config and fire all channels
-        ag_obj = _agencies.get_by_name(agency)
+        ag_obj = await _agencies.get_by_name(agency)
         notification_config = ag_obj.notification_config if ag_obj else {}
-        _notifier.decision(booking, decision, notification_config=notification_config)
+        await asyncio.to_thread(
+            _notifier.decision, booking, decision,
+            notification_config=notification_config,
+        )
 
     return decision.action.value
 
 
-async def _trigger_prism(
-    booking_id: str,
-    current_price: float,
-    seats_remaining: int,
-    agency: str,
-) -> None:
-    loop = asyncio.get_event_loop()
-    await loop.run_in_executor(
-        _executor,
-        _run_prism_sync,
-        booking_id, current_price, seats_remaining, agency,
-    )
-
-
 async def scan_all_active() -> int:
-    rows = _bookings.get_active()
+    """Evaluate all due B2B bookings concurrently via asyncio.gather."""
+    rows = await _bookings.get_active()
     b2b  = [b for b in rows if b.metadata.get("source") == "b2b_api_v1"]
     if not b2b:
         return 0
 
-    log.info("PRISM scan: %d active B2B booking(s) to check", len(b2b))
-    count = 0
     now   = datetime.utcnow()
-
+    tasks = []
     for booking in b2b:
         current_price = float(booking.metadata.get("current_price") or 0)
         if current_price <= 0:
@@ -229,19 +226,25 @@ async def scan_all_active() -> int:
 
         seats  = int(booking.metadata.get("seats_remaining") or 9)
         agency = booking.metadata.get("agency", "unknown")
-        try:
-            await _trigger_prism(booking.booking_id, current_price, seats, agency)
-            count += 1
-        except Exception as exc:
-            log.error("Scan failed [%s]: %s", booking.booking_id, exc)
+        tasks.append(_trigger_prism(booking.booking_id, current_price, seats, agency))
 
-    if count:
-        log.info("PRISM scan complete: %d evaluated", count)
+    if not tasks:
+        return 0
+
+    log.info("PRISM scan: %d booking(s) queued for concurrent evaluation", len(tasks))
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    errors = [r for r in results if isinstance(r, Exception)]
+    for err in errors:
+        log.error("PRISM scan task exception: %s", err)
+
+    count = len(tasks) - len(errors)
+    log.info("PRISM scan complete: %d/%d evaluated", count, len(tasks))
     return count
 
 
 # ---------------------------------------------------------------------------
-# Shared helpers
+# Shared response helper
 # ---------------------------------------------------------------------------
 
 def _booking_to_response(d: dict) -> dict:
@@ -489,13 +492,13 @@ async def submit_monitor(
     agency, _, tier = auth
 
     if idempotency_key:
-        cached = _bookings.get_idempotency(idempotency_key)
+        cached = await _bookings.get_idempotency(idempotency_key)
         if cached:
             return cached["response"]
 
     limits = TIER_LIMITS.get(tier, TIER_LIMITS["free"])
     if limits["max_bookings"] > 0:
-        active_rows = [r for r in _bookings.get_by_agency(agency) if r.get("_active")]
+        active_rows = [r for r in await _bookings.get_by_agency(agency) if r.get("_active")]
         if len(active_rows) >= limits["max_bookings"]:
             raise HTTPException(
                 status_code=402,
@@ -538,9 +541,9 @@ async def submit_monitor(
         notify_webhook=payload.webhook_url,
         metadata=meta,
     )
-    _bookings.upsert(booking)
+    await _bookings.upsert(booking)
 
-    _bookings.log_audit(tracking_id, agency, "submitted", {
+    await _bookings.log_audit(tracking_id, agency, "submitted", {
         "route":            f"{payload.origin}-{payload.destination}",
         "original_price":   payload.original_price,
         "current_price":    payload.current_price,
@@ -575,7 +578,7 @@ async def submit_monitor(
     }
 
     if idempotency_key:
-        _bookings.set_idempotency(idempotency_key, tracking_id, response)
+        await _bookings.set_idempotency(idempotency_key, tracking_id, response)
 
     return response
 
@@ -590,7 +593,7 @@ async def list_bookings(
     auth: tuple = Depends(require_api_key),
 ):
     agency, *_ = auth
-    rows = _bookings.get_by_agency(agency)
+    rows = await _bookings.get_by_agency(agency)
     if status_filter == "monitoring":
         rows = [r for r in rows if r.get("_active")]
     elif status_filter == "stopped":
@@ -601,7 +604,7 @@ async def list_bookings(
 @router.get("/bookings/{tracking_id}")
 async def get_booking(tracking_id: str, auth: tuple = Depends(require_api_key)):
     agency, *_ = auth
-    rows  = _bookings.get_by_agency(agency)
+    rows  = await _bookings.get_by_agency(agency)
     match = next((r for r in rows if r["booking_id"] == tracking_id), None)
     if not match:
         raise HTTPException(status_code=404, detail="Booking not found.")
@@ -611,10 +614,10 @@ async def get_booking(tracking_id: str, auth: tuple = Depends(require_api_key)):
 @router.get("/bookings/{tracking_id}/audit")
 async def get_booking_audit(tracking_id: str, auth: tuple = Depends(require_api_key)):
     agency, *_ = auth
-    booking = _bookings.get_by_id(tracking_id)
+    booking = await _bookings.get_by_id(tracking_id)
     if not booking or booking.metadata.get("agency") != agency:
         raise HTTPException(status_code=404, detail="Booking not found.")
-    trail = _bookings.get_audit(tracking_id)
+    trail = await _bookings.get_audit(tracking_id)
     return {"tracking_id": tracking_id, "count": len(trail), "trail": trail}
 
 
@@ -638,7 +641,7 @@ async def patch_booking(
     auth: tuple = Depends(require_api_key),
 ):
     agency, *_ = auth
-    booking = _bookings.get_by_id(tracking_id)
+    booking = await _bookings.get_by_id(tracking_id)
     if not booking or booking.metadata.get("agency") != agency:
         raise HTTPException(status_code=404, detail="Booking not found.")
 
@@ -681,10 +684,10 @@ async def patch_booking(
 
     updated_at = datetime.utcnow().isoformat() + "Z"
     booking.metadata["updated_at"] = updated_at
-    _bookings.upsert(booking)
-    _bookings.log_audit(tracking_id, agency, "updated", {"changes": changes, "updated_at": updated_at})
+    await _bookings.upsert(booking)
+    await _bookings.log_audit(tracking_id, agency, "updated", {"changes": changes, "updated_at": updated_at})
 
-    prism_triggered = False
+    prism_triggered     = False
     prism_skipped_reason = None
     if payload.current_price is not None:
         if not _can_rebook(booking.original_price, payload.current_price, booking.cancellation_fee):
@@ -720,22 +723,25 @@ async def patch_booking(
 @router.delete("/bookings/{tracking_id}")
 async def delete_booking(tracking_id: str, auth: tuple = Depends(require_api_key)):
     agency, *_ = auth
-    booking = _bookings.get_by_id(tracking_id)
+    booking = await _bookings.get_by_id(tracking_id)
     if not booking or booking.metadata.get("agency") != agency:
         raise HTTPException(status_code=404, detail="Booking not found.")
-    _bookings.deactivate(tracking_id)
-    _bookings.log_audit(tracking_id, agency, "stopped", {"stopped_at": datetime.utcnow().isoformat() + "Z"})
+    await _bookings.deactivate(tracking_id)
+    await _bookings.log_audit(
+        tracking_id, agency, "stopped",
+        {"stopped_at": datetime.utcnow().isoformat() + "Z"},
+    )
     return {"ok": True, "tracking_id": tracking_id, "status": "stopped"}
 
 
 @router.get("/analytics")
 async def analytics(auth: tuple = Depends(require_api_key)):
     agency, api_key, tier = auth
-    rows    = _bookings.get_by_agency(agency)
+    rows    = await _bookings.get_by_agency(agency)
     active  = [r for r in rows if r.get("_active")]
     stopped = [r for r in rows if not r.get("_active")]
-    savings = _bookings.get_agency_savings(agency)
-    ag_obj  = _agencies.get_by_key(api_key)
+    savings = await _bookings.get_agency_savings(agency)
+    ag_obj  = await _agencies.get_by_key(api_key)
     limits  = TIER_LIMITS.get(tier, TIER_LIMITS["free"])
     return {
         "agency":               agency,
@@ -754,7 +760,7 @@ async def analytics(auth: tuple = Depends(require_api_key)):
 @router.get("/account")
 async def account(auth: tuple = Depends(require_api_key)):
     agency, api_key, tier = auth
-    ag     = _agencies.get_by_key(api_key)
+    ag     = await _agencies.get_by_key(api_key)
     limits = TIER_LIMITS.get(tier, TIER_LIMITS["free"])
     return {
         "agency":         ag.name,

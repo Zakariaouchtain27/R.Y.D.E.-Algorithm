@@ -10,11 +10,13 @@ from typing import Optional, Set
 from fastapi import FastAPI, Form, Header, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
+from sqlalchemy import text
 
 from ryde.logging_config import setup_logging
 setup_logging(os.getenv("LOG_LEVEL", "INFO"))
 
 from ryde import events as ryde_events
+from ryde.db import AsyncSessionLocal, init_db
 from ryde.live_market import get_market
 from ryde.models import Booking, Passenger
 from ryde.price_monitor import PriceMonitor
@@ -93,17 +95,23 @@ _scan_task:   Optional[asyncio.Task] = None
 
 
 def _on_ryde_event(event: dict) -> None:
+    """Sync callback from ryde_events; schedules async work on the main loop."""
     if _loop is None or _loop.is_closed():
         return
+
     booking_id = event.get("booking_id", "")
     event_type = event.get("type", "decision")
+
     if booking_id and event_type != "market":
-        try:
-            booking = _bookings.get_by_id(booking_id)
-            agency  = booking.metadata.get("agency", "") if booking else ""
-            _bookings.log_audit(booking_id, agency, event_type, event)
-        except Exception:
-            pass
+        async def _write_audit():
+            try:
+                booking = await _bookings.get_by_id(booking_id)
+                agency  = booking.metadata.get("agency", "") if booking else ""
+                await _bookings.log_audit(booking_id, agency, event_type, event)
+            except Exception as exc:
+                log.debug("Event audit write failed: %s", exc)
+        asyncio.run_coroutine_threadsafe(_write_audit(), _loop)
+
     asyncio.run_coroutine_threadsafe(_manager.broadcast(event), _loop)
 
 
@@ -127,6 +135,10 @@ async def _lifespan(app: FastAPI):
 
     Path(_db_path).parent.mkdir(parents=True, exist_ok=True)
 
+    # Initialise DB schema (idempotent) and seed dev keys
+    await init_db()
+    await _agencies.seed_dev_keys()
+
     _price_monitor = PriceMonitor(store=_bookings, scan_interval=_SCAN_INTERVAL)
     _price_monitor.start()
 
@@ -137,7 +149,7 @@ async def _lifespan(app: FastAPI):
 
     log.info(
         "RYDE startup complete",
-        extra={"db": "postgres" if os.getenv("DATABASE_URL") else "sqlite", "scan_interval_s": _SCAN_INTERVAL},
+        extra={"scan_interval_s": _SCAN_INTERVAL},
     )
 
     yield
@@ -174,10 +186,10 @@ templates = Jinja2Templates(directory=template_dir)
 # Health
 # ---------------------------------------------------------------------------
 
-def _db_ping() -> str:
+async def _db_ping() -> str:
     try:
-        with _bookings._lock:
-            _bookings._execute("SELECT 1").fetchone()
+        async with AsyncSessionLocal() as session:
+            await session.execute(text("SELECT 1"))
         return "ok"
     except Exception as exc:
         return f"error: {exc}"
@@ -185,15 +197,15 @@ def _db_ping() -> str:
 
 @app.get("/health")
 async def health():
-    checks: dict = {}
     try:
-        checks["db"] = await asyncio.wait_for(
-            asyncio.to_thread(_db_ping), timeout=5.0
-        )
+        db_status = await asyncio.wait_for(_db_ping(), timeout=5.0)
     except asyncio.TimeoutError:
-        checks["db"] = "timeout"
-    checks["market"]     = "ok" if (_market_task and not _market_task.done()) else "stopped"
-    checks["prism_scan"] = "ok" if (_scan_task   and not _scan_task.done())   else "stopped"
+        db_status = "timeout"
+    checks = {
+        "db":         db_status,
+        "market":     "ok" if (_market_task and not _market_task.done()) else "stopped",
+        "prism_scan": "ok" if (_scan_task   and not _scan_task.done())   else "stopped",
+    }
     overall = "ok" if all(v == "ok" for v in checks.values()) else "degraded"
     return JSONResponse(
         status_code=200,
@@ -251,14 +263,14 @@ async def welcome(request: Request):
 # Agency Dashboard
 # ---------------------------------------------------------------------------
 
-def _require_agency_key(
+async def _require_agency_key(
     x_agency_key: Optional[str],
     x_api_key: Optional[str],
 ):
     key = x_agency_key or x_api_key
     if not key:
         raise HTTPException(status_code=401, detail="Missing X-Agency-Key header.")
-    agency_obj = _agencies.get_by_key(key)
+    agency_obj = await _agencies.get_by_key(key)
     if not agency_obj:
         raise HTTPException(status_code=403, detail="Invalid or revoked API key.")
     return agency_obj
@@ -274,12 +286,12 @@ async def agency_dashboard_stats(
     x_agency_key: Optional[str] = Header(default=None),
     x_api_key:    Optional[str] = Header(default=None),
 ):
-    agency_obj     = _require_agency_key(x_agency_key, x_api_key)
+    agency_obj     = await _require_agency_key(x_agency_key, x_api_key)
     agency         = agency_obj.name
     tier           = agency_obj.subscription_tier
     limits         = TIER_LIMITS.get(tier, TIER_LIMITS["free"])
-    rows           = _bookings.get_by_agency(agency)
-    last_decisions = _bookings.get_last_decision_by_agency(agency)
+    rows           = await _bookings.get_by_agency(agency)
+    last_decisions = await _bookings.get_last_decision_by_agency(agency)
 
     active_count  = sum(1 for r in rows if r.get("_active"))
     strike_count  = sum(1 for d in last_decisions.values() if d.get("action") == "STRIKE")
@@ -344,7 +356,7 @@ async def agency_dashboard_price_history(
     x_agency_key: Optional[str] = Header(default=None),
     x_api_key:    Optional[str] = Header(default=None),
 ):
-    _require_agency_key(x_agency_key, x_api_key)
+    await _require_agency_key(x_agency_key, x_api_key)
     points = await asyncio.to_thread(_price_history.get_price_history_for_chart, route_key)
     return {"route_key": route_key, "points": points, "count": len(points)}
 
@@ -353,7 +365,6 @@ async def agency_dashboard_price_history(
 # Notification settings
 # ---------------------------------------------------------------------------
 
-# Allowed keys so arbitrary data can't be stored in the config blob
 _NOTIF_ALLOWED_KEYS = {
     "slack_webhook", "email", "whatsapp_to",
     "telegram_chat_id", "webhook_url",
@@ -365,9 +376,8 @@ async def get_notifications(
     x_agency_key: Optional[str] = Header(default=None),
     x_api_key:    Optional[str] = Header(default=None),
 ):
-    agency_obj = _require_agency_key(x_agency_key, x_api_key)
+    agency_obj = await _require_agency_key(x_agency_key, x_api_key)
     cfg = agency_obj.notification_config or {}
-    # Return which channels are active + masked values
     return {
         "slack_webhook":    _mask(cfg.get("slack_webhook", "")),
         "email":            cfg.get("email", ""),
@@ -384,25 +394,21 @@ async def save_notifications(
     x_agency_key: Optional[str] = Header(default=None),
     x_api_key:    Optional[str] = Header(default=None),
 ):
-    agency_obj = _require_agency_key(x_agency_key, x_api_key)
+    agency_obj = await _require_agency_key(x_agency_key, x_api_key)
     body = await request.json()
-
-    # Keep existing config, overlay only allowed keys
-    cfg = dict(agency_obj.notification_config or {})
+    cfg  = dict(agency_obj.notification_config or {})
     for key in _NOTIF_ALLOWED_KEYS:
         if key in body:
             value = str(body[key]).strip()
             if value:
                 cfg[key] = value
             else:
-                cfg.pop(key, None)  # empty string = remove channel
-
-    _agencies.set_notification_config(agency_obj.id, cfg)
+                cfg.pop(key, None)
+    await _agencies.set_notification_config(agency_obj.id, cfg)
     return {"ok": True, "channels_active": [k for k in _NOTIF_ALLOWED_KEYS if cfg.get(k)]}
 
 
 def _mask(url: str) -> str:
-    """Return a masked version of a URL/token for display (don't expose secrets)."""
     if not url:
         return ""
     if len(url) <= 12:
@@ -419,15 +425,15 @@ async def billing_setup_intent(
     x_agency_key: Optional[str] = Header(default=None),
     x_api_key:    Optional[str] = Header(default=None),
 ):
-    agency_obj = _require_agency_key(x_agency_key, x_api_key)
+    agency_obj = await _require_agency_key(x_agency_key, x_api_key)
     stripe_client = _get_stripe()
 
     if not agency_obj.stripe_customer_id:
         customer = await asyncio.to_thread(
             stripe_client.create_customer, agency_obj.email, agency_obj.name
         )
-        _agencies.set_stripe_customer(agency_obj.id, customer.id)
-        agency_obj = _agencies.get_by_id(agency_obj.id)
+        await _agencies.set_stripe_customer(agency_obj.id, customer.id)
+        agency_obj = await _agencies.get_by_id(agency_obj.id)
 
     setup_intent = await asyncio.to_thread(
         stripe_client.create_setup_intent, agency_obj.stripe_customer_id
@@ -449,7 +455,7 @@ async def billing_setup_confirm(
     x_agency_key: Optional[str] = Header(default=None),
     x_api_key:    Optional[str] = Header(default=None),
 ):
-    agency_obj = _require_agency_key(x_agency_key, x_api_key)
+    agency_obj = await _require_agency_key(x_agency_key, x_api_key)
     body = await request.json()
     payment_method_id = body.get("payment_method_id")
     if not payment_method_id:
@@ -471,15 +477,14 @@ async def agency_billing(
     x_api_key:    Optional[str] = Header(default=None),
 ):
     from datetime import timezone
-    agency_obj = _require_agency_key(x_agency_key, x_api_key)
+    agency_obj = await _require_agency_key(x_agency_key, x_api_key)
     agency     = agency_obj.name
     tier       = agency_obj.subscription_tier
     limits     = TIER_LIMITS.get(tier, TIER_LIMITS["free"])
 
-    rows         = _bookings.get_by_agency(agency)
+    rows         = await _bookings.get_by_agency(agency)
     active_count = sum(1 for r in rows if r.get("_active"))
-
-    events = await asyncio.to_thread(_bookings.get_billing_events, agency)
+    events       = await _bookings.get_billing_events(agency)
 
     card = None
     if agency_obj.stripe_customer_id:
@@ -556,7 +561,7 @@ async def signup_submit(
             "error": "Please enter a valid agency name and email address."
         }, status_code=422)
     try:
-        agency = _agencies.create_agency(name=name, email=email, environment="test")
+        agency = await _agencies.create_agency(name=name, email=email, environment="test")
     except Exception as exc:
         log.error("Free signup failed", extra={"email": email, "error": str(exc)})
         return templates.TemplateResponse(request, "signup.html", {
@@ -625,7 +630,7 @@ async def register_submit(
         "seat_preference":  seat_preference,
     }
     try:
-        _clients.create_client(
+        await _clients.create_client(
             client_id=client_id,
             name=name.strip(),
             email=email.strip().lower(),
@@ -644,9 +649,9 @@ async def register_submit(
         customer = await asyncio.to_thread(
             _get_stripe().create_customer, email.strip().lower(), name.strip()
         )
-        _clients.update_stripe_customer(client_id, customer.id)
+        await _clients.update_stripe_customer(client_id, customer.id)
     except Exception:
-        _clients.delete_client(client_id)
+        await _clients.delete_client(client_id)
         log.error("Stripe customer creation failed during B2C registration", extra={"email": email})
         return templates.TemplateResponse(
             request, "register.html",
@@ -659,7 +664,7 @@ async def register_submit(
 
 @app.get("/setup-payment/{client_id}", response_class=HTMLResponse)
 async def setup_payment_page(request: Request, client_id: str):
-    client = _clients.get_client(client_id)
+    client = await _clients.get_client(client_id)
     if not client:
         raise HTTPException(status_code=404)
     setup_intent = _get_stripe().create_setup_intent(client["stripe_customer_id"])
@@ -672,11 +677,11 @@ async def setup_payment_page(request: Request, client_id: str):
 
 @app.post("/setup-payment/{client_id}/confirm")
 async def confirm_setup(client_id: str, payment_method_id: str = Form(...)):
-    client = _clients.get_client(client_id)
+    client = await _clients.get_client(client_id)
     if not client:
         raise HTTPException(status_code=404)
-    _clients.save_payment_method(client_id, payment_method_id)
-    _clients.activate_monitoring(client_id)
+    await _clients.save_payment_method(client_id, payment_method_id)
+    await _clients.activate_monitoring(client_id)
     bd = client["booking_data"]
     name_parts = client["name"].split()
     booking = Booking(
@@ -693,13 +698,13 @@ async def confirm_setup(client_id: str, payment_method_id: str = Form(...)):
         adapter="duffel", adapter_booking_ref=bd["booking_ref"],
         notify_webhook=f"{_BASE_URL}/webhook/ryde",
     )
-    _bookings.upsert(booking)
+    await _bookings.upsert(booking)
     return RedirectResponse(f"/success/{client_id}", status_code=303)
 
 
 @app.get("/success/{client_id}", response_class=HTMLResponse)
 async def success_page(request: Request, client_id: str):
-    client = _clients.get_client(client_id)
+    client = await _clients.get_client(client_id)
     if not client:
         raise HTTPException(status_code=404)
     return templates.TemplateResponse(request, "success.html", {"client": client})
@@ -707,10 +712,10 @@ async def success_page(request: Request, client_id: str):
 
 @app.get("/dashboard/{client_id}", response_class=HTMLResponse)
 async def dashboard(request: Request, client_id: str):
-    client = _clients.get_client(client_id)
+    client = await _clients.get_client(client_id)
     if not client:
         raise HTTPException(status_code=404)
-    ev = _clients.get_events(client_id)
+    ev = await _clients.get_events(client_id)
     return templates.TemplateResponse(request, "dashboard.html", {"client": client, "events": ev})
 
 
@@ -721,9 +726,9 @@ async def ryde_webhook(request: Request):
     booking_id = payload.get("booking_id")
     if event == "ryde.rebooking" and payload.get("success"):
         savings = float(payload.get("savings_realized", 0))
-        client  = _clients.get_client(booking_id)
+        client  = await _clients.get_client(booking_id)
         if client and savings > 0:
-            _clients.add_savings(booking_id, savings)
+            await _clients.add_savings(booking_id, savings)
     if booking_id:
-        _clients.log_event(booking_id, event, payload)
+        await _clients.log_event(booking_id, event, payload)
     return {"ok": True}
