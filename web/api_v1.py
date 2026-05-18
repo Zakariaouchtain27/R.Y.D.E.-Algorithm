@@ -3,6 +3,12 @@ RYDE B2B API v1
 ===============
 All endpoints require:  X-Agency-Key: <agency_key>
 
+Subscription tiers
+------------------
+  free     — 3 active bookings, 20 req/60 s
+  starter  — 25 active bookings, 60 req/60 s  ($49/mo)
+  pro      — unlimited bookings, 120 req/60 s  ($149/mo)
+
 How PRISM evaluation works
 --------------------------
 PRISM (Longstaff-Schwartz Monte Carlo) runs automatically whenever a
@@ -11,41 +17,16 @@ current_price is provided:
   POST /monitor           — include current_price to evaluate on submit
   PATCH /bookings/{id}    — push a new current_price to re-evaluate
 
-Duplicate-webhook protection
------------------------------
-Each PRISM run records last_evaluated_price + last_evaluated_at in the
-booking metadata. A subsequent PATCH with the same price is silently
-skipped unless at least 5 minutes have passed (price unchanged but time
-decay could shift the decision). Different price always re-evaluates.
-
 Webhook security
 -----------------
 Every webhook POST is signed:
   X-RYDE-Signature: sha256=<hmac-sha256-hex>
 Verify with: hmac.new(RYDE_WEBHOOK_SECRET, body, sha256).hexdigest()
 
-Time-decay scan frequency
---------------------------
-Background scheduler runs every 15 minutes.
-Per booking, re-evaluation frequency scales with urgency:
-  >= 14 days to departure  →  re-evaluate every 60 minutes
-   7–14 days to departure  →  re-evaluate every 30 minutes
-    < 7 days to departure  →  re-evaluate every 15 minutes
-
 Idempotency
 -----------
 POST /monitor accepts an optional  Idempotency-Key: <uuid>  header.
 Returns the original 201 response on duplicate keys — safe to retry.
-
-Success-fee billing
--------------------
-Every STRIKE decision triggers an automatic 20% success-fee charge
-against the agency's stored Stripe card (stripe_customer_id in agencies
-table). Requires STRIPE_SECRET_KEY env var and a Stripe customer on file.
-All charge outcomes are written to the audit trail:
-  billing_charged — fee_usd, net_savings, stripe_payment_intent
-  billing_error   — fee_usd, error; also fires ryde.billing_error webhook
-  billing_skipped — no_stripe_customer (card not yet on file)
 
 Endpoints
 ---------
@@ -74,7 +55,7 @@ import numpy as np
 from fastapi import APIRouter, Depends, Header, HTTPException, status
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from ryde.agency_store import AgencyStore
+from ryde.agency_store import AgencyStore, TIER_LIMITS
 from ryde.models import Booking, Passenger, PriceSnapshot, RYDEAction
 from ryde.notifier import Notifier
 from ryde.prism import PRISMEngine
@@ -90,27 +71,9 @@ _engine   = PRISMEngine(_db_path)
 _notifier = Notifier()
 _executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="prism")
 
-# ---------------------------------------------------------------------------
-# Stripe success-fee client (None when STRIPE_SECRET_KEY is not configured)
-# ---------------------------------------------------------------------------
-
-def _make_stripe_client():
-    key = os.getenv("STRIPE_SECRET_KEY", "")
-    if not key:
-        return None
-    try:
-        from .stripe_client import StripeClient
-        return StripeClient(key)
-    except ImportError:
-        log.warning("stripe package not installed — success-fee billing disabled")
-        return None
-
-
-_stripe_client = _make_stripe_client()
-
-# Seconds between re-evaluations per booking based on days to departure.
 _EVAL_INTERVAL = {"far": 3600, "close": 1800, "urgent": 900}
 _PATCH_COOLDOWN = 300
+_RATE_WINDOW = 60
 
 
 def _scan_interval(days: int) -> int:
@@ -122,21 +85,20 @@ def _scan_interval(days: int) -> int:
 
 
 # ---------------------------------------------------------------------------
-# Rate limiting  (60 requests / 60 seconds per key, in-memory)
+# Tier-aware rate limiting  (in-memory)
 # ---------------------------------------------------------------------------
 
 _call_log: dict = defaultdict(list)
-_RATE_LIMIT  = 60
-_RATE_WINDOW = 60
 
 
-def _check_rate(api_key: str) -> None:
+def _check_rate(api_key: str, tier: str = "free") -> None:
+    limit = TIER_LIMITS.get(tier, TIER_LIMITS["free"])["rate_limit"]
     now = time.monotonic()
     _call_log[api_key] = [t for t in _call_log[api_key] if now - t < _RATE_WINDOW]
-    if len(_call_log[api_key]) >= _RATE_LIMIT:
+    if len(_call_log[api_key]) >= limit:
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail=f"Rate limit: {_RATE_LIMIT} requests / {_RATE_WINDOW}s.",
+            detail=f"Rate limit: {limit} requests / {_RATE_WINDOW}s ({tier} plan). Upgrade at /pricing",
             headers={"Retry-After": "60"},
         )
     _call_log[api_key].append(now)
@@ -163,9 +125,9 @@ async def require_api_key(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Invalid or revoked API key.",
         )
-    _check_rate(key)
+    _check_rate(key, agency.subscription_tier)
     _agencies.log_call(key)
-    return agency.name, key
+    return agency.name, key, agency.subscription_tier
 
 
 # ---------------------------------------------------------------------------
@@ -181,90 +143,7 @@ def _seconds_since(iso_str: str) -> float:
 
 
 def _can_rebook(original_price: float, current_price: float, cancellation_fee: float) -> bool:
-    """True when rebooking yields positive net savings after the cancellation fee."""
     return (original_price - current_price - cancellation_fee) > 0
-
-
-def _charge_success_fee_sync(
-    booking: Booking,
-    agency_name: str,
-    net_savings: float,
-) -> None:
-    """
-    Charge 20% success fee against the agency's Stripe card on file.
-
-    Runs synchronously inside the PRISM executor thread.
-    Writes billing_charged / billing_error / billing_skipped to audit trail.
-    """
-    if _stripe_client is None:
-        log.debug(
-            "STRIPE_SECRET_KEY not configured — skipping success fee for %s",
-            booking.booking_id,
-        )
-        return
-
-    fee     = round(net_savings * 0.20, 2)
-    now_iso = datetime.utcnow().isoformat() + "Z"
-
-    ag = _agencies.get_by_name(agency_name)
-    if not ag or not ag.stripe_customer_id:
-        log.warning(
-            "No Stripe customer on file for agency '%s' — cannot charge success fee for %s",
-            agency_name, booking.booking_id,
-        )
-        _bookings.log_audit(booking.booking_id, agency_name, "billing_skipped", {
-            "reason":      "no_stripe_customer",
-            "fee_usd":     fee,
-            "net_savings": round(net_savings, 2),
-            "skipped_at":  now_iso,
-        })
-        return
-
-    if int(fee * 100) < _stripe_client.MIN_CHARGE_CENTS:
-        log.info(
-            "Success fee $%.2f for booking %s is below Stripe minimum — skipping charge",
-            fee, booking.booking_id,
-        )
-        _bookings.log_audit(booking.booking_id, agency_name, "billing_skipped", {
-            "reason":      "below_minimum_charge",
-            "fee_usd":     fee,
-            "net_savings": round(net_savings, 2),
-            "skipped_at":  now_iso,
-        })
-        return
-
-    success, pi, error = _stripe_client.charge_success_fee(
-        customer_id=ag.stripe_customer_id,
-        amount_usd=fee,
-        booking_id=booking.booking_id,
-        net_savings=net_savings,
-    )
-
-    if success:
-        pi_id = pi.id if pi else None
-        log.info(
-            "Success fee $%.2f charged for booking %s (agency: %s, pi: %s)",
-            fee, booking.booking_id, agency_name, pi_id,
-        )
-        _bookings.log_audit(booking.booking_id, agency_name, "billing_charged", {
-            "fee_usd":               fee,
-            "net_savings":           round(net_savings, 2),
-            "fee_pct":               20,
-            "stripe_payment_intent": pi_id,
-            "charged_at":            now_iso,
-        })
-    else:
-        log.error(
-            "Success fee charge FAILED for booking %s (agency: %s): %s",
-            booking.booking_id, agency_name, error,
-        )
-        _bookings.log_audit(booking.booking_id, agency_name, "billing_error", {
-            "fee_usd":    fee,
-            "net_savings": round(net_savings, 2),
-            "error":      error or "Unknown error",
-            "failed_at":  now_iso,
-        })
-        _notifier.billing_error(booking, fee, error or "Unknown error")
 
 
 def _run_prism_sync(
@@ -273,9 +152,6 @@ def _run_prism_sync(
     seats_remaining: int,
     agency: str,
 ) -> str:
-    """
-    CPU-bound: runs 5,000 Monte Carlo paths. Always called via run_in_executor.
-    """
     booking = _bookings.get_by_id(booking_id)
     if not booking:
         log.error("PRISM: booking %s not found", booking_id)
@@ -320,16 +196,6 @@ def _run_prism_sync(
     if decision.action in (RYDEAction.STRIKE, RYDEAction.PHANTOM_HOLD):
         _notifier.decision(booking, decision)
 
-    # Charge 20% success fee on every STRIKE.
-    # Signal API mode: agency acts on the webhook; we bill at decision time.
-    if decision.action == RYDEAction.STRIKE and _can_rebook(
-        booking.original_price, current_price, booking.cancellation_fee
-    ):
-        _charge_success_fee_sync(
-            booking, agency,
-            booking.original_price - current_price - booking.cancellation_fee,
-        )
-
     return decision.action.value
 
 
@@ -348,10 +214,6 @@ async def _trigger_prism(
 
 
 async def scan_all_active() -> int:
-    """
-    Re-evaluate active B2B bookings using stored current_price.
-    Called by the 15-minute background task in app.py.
-    """
     rows = _bookings.get_active()
     b2b  = [b for b in rows if b.metadata.get("source") == "b2b_api_v1"]
     if not b2b:
@@ -632,12 +494,25 @@ async def submit_monitor(
     auth: tuple = Depends(require_api_key),
     idempotency_key: Optional[str] = Header(default=None),
 ):
-    agency, _ = auth
+    agency, _, tier = auth
 
     if idempotency_key:
         cached = _bookings.get_idempotency(idempotency_key)
         if cached:
             return cached["response"]
+
+    # Enforce active booking cap based on subscription tier
+    limits = TIER_LIMITS.get(tier, TIER_LIMITS["free"])
+    if limits["max_bookings"] > 0:
+        active_rows = [r for r in _bookings.get_by_agency(agency) if r.get("_active")]
+        if len(active_rows) >= limits["max_bookings"]:
+            raise HTTPException(
+                status_code=402,
+                detail=(
+                    f"Active booking limit reached ({limits['max_bookings']} max on {tier} plan). "
+                    "Upgrade at /pricing"
+                ),
+            )
 
     tracking_id = f"b2b_{uuid.uuid4().hex[:16]}"
     now_iso     = datetime.utcnow().isoformat() + "Z"
@@ -723,7 +598,7 @@ async def list_bookings(
     status_filter: Optional[str] = None,
     auth: tuple = Depends(require_api_key),
 ):
-    agency, _ = auth
+    agency, *_ = auth
     rows = _bookings.get_by_agency(agency)
     if status_filter == "monitoring":
         rows = [r for r in rows if r.get("_active")]
@@ -738,7 +613,7 @@ async def list_bookings(
 
 @router.get("/bookings/{tracking_id}")
 async def get_booking(tracking_id: str, auth: tuple = Depends(require_api_key)):
-    agency, _ = auth
+    agency, *_ = auth
     rows  = _bookings.get_by_agency(agency)
     match = next((r for r in rows if r["booking_id"] == tracking_id), None)
     if not match:
@@ -752,7 +627,7 @@ async def get_booking(tracking_id: str, auth: tuple = Depends(require_api_key)):
 
 @router.get("/bookings/{tracking_id}/audit")
 async def get_booking_audit(tracking_id: str, auth: tuple = Depends(require_api_key)):
-    agency, _ = auth
+    agency, *_ = auth
     booking = _bookings.get_by_id(tracking_id)
     if not booking or booking.metadata.get("agency") != agency:
         raise HTTPException(status_code=404, detail="Booking not found.")
@@ -779,7 +654,7 @@ async def patch_booking(
     payload: PatchBookingRequest,
     auth: tuple = Depends(require_api_key),
 ):
-    agency, _ = auth
+    agency, *_ = auth
     booking = _bookings.get_by_id(tracking_id)
     if not booking or booking.metadata.get("agency") != agency:
         raise HTTPException(status_code=404, detail="Booking not found.")
@@ -865,7 +740,7 @@ async def patch_booking(
 
 @router.delete("/bookings/{tracking_id}")
 async def delete_booking(tracking_id: str, auth: tuple = Depends(require_api_key)):
-    agency, _ = auth
+    agency, *_ = auth
     booking = _bookings.get_by_id(tracking_id)
     if not booking or booking.metadata.get("agency") != agency:
         raise HTTPException(status_code=404, detail="Booking not found.")
@@ -880,23 +755,24 @@ async def delete_booking(tracking_id: str, auth: tuple = Depends(require_api_key
 
 @router.get("/analytics")
 async def analytics(auth: tuple = Depends(require_api_key)):
-    agency, api_key = auth
+    agency, api_key, tier = auth
     rows    = _bookings.get_by_agency(agency)
     active  = [r for r in rows if r.get("_active")]
     stopped = [r for r in rows if not r.get("_active")]
     savings = _bookings.get_agency_savings(agency)
     ag_obj  = _agencies.get_by_key(api_key)
+    limits  = TIER_LIMITS.get(tier, TIER_LIMITS["free"])
     return {
         "agency":               agency,
+        "plan":                 tier,
         "total_monitored":      len(rows),
         "currently_monitoring": len(active),
         "stopped":              len(stopped),
         "total_savings_usd":    round(savings, 2),
-        "ryde_fees_usd":        round(savings * 0.20, 2),
-        "net_savings_usd":      round(savings * 0.80, 2),
         "total_api_calls":      ag_obj.total_calls if ag_obj else 0,
         "last_api_call":        ag_obj.last_call_at if ag_obj else None,
-        "rate_limit":           f"{_RATE_LIMIT} requests / {_RATE_WINDOW}s",
+        "rate_limit":           f"{limits['rate_limit']} requests / {_RATE_WINDOW}s",
+        "booking_limit":        limits["max_bookings"] if limits["max_bookings"] > 0 else "unlimited",
     }
 
 
@@ -906,17 +782,20 @@ async def analytics(auth: tuple = Depends(require_api_key)):
 
 @router.get("/account")
 async def account(auth: tuple = Depends(require_api_key)):
-    agency, api_key = auth
-    ag = _agencies.get_by_key(api_key)
+    agency, api_key, tier = auth
+    ag     = _agencies.get_by_key(api_key)
+    limits = TIER_LIMITS.get(tier, TIER_LIMITS["free"])
     return {
-        "agency":             ag.name,
-        "email":              ag.email,
-        "environment":        ag.environment,
-        "key_prefix":         api_key[:20] + "...",
-        "member_since":       ag.created_at,
-        "total_calls":        ag.total_calls,
-        "last_call":          ag.last_call_at,
-        "rate_limit":         f"{_RATE_LIMIT} req / {_RATE_WINDOW}s",
+        "agency":         ag.name,
+        "email":          ag.email,
+        "environment":    ag.environment,
+        "key_prefix":     api_key[:20] + "...",
+        "member_since":   ag.created_at,
+        "total_calls":    ag.total_calls,
+        "last_call":      ag.last_call_at,
+        "plan":           tier,
+        "rate_limit":     f"{limits['rate_limit']} req / {_RATE_WINDOW}s",
+        "booking_limit":  limits["max_bookings"] if limits["max_bookings"] > 0 else "unlimited",
         "billing_configured": ag.stripe_customer_id is not None,
         "endpoints": [
             "POST   /api/v1/predict",
