@@ -20,7 +20,7 @@ from ryde.models import Booking, Passenger
 from ryde.price_monitor import PriceMonitor
 from ryde.prism.price_history import PriceHistory
 from ryde.store import BookingStore
-from ryde.agency_store import AgencyStore
+from ryde.agency_store import AgencyStore, TIER_LIMITS
 from .admin import router as admin_router
 from .api_v1 import router as api_v1_router, scan_all_active
 from .lemon import router as lemon_router
@@ -38,7 +38,7 @@ _stripe: Optional[StripeClient] = None
 
 _BASE_URL        = os.getenv("BASE_URL", "http://localhost:8000")
 _MARKET_INTERVAL = float(os.getenv("MARKET_TICK_SECONDS", "3"))
-_SCAN_INTERVAL   = int(os.getenv("PRISM_SCAN_INTERVAL_SECONDS", "900"))  # 15 min default
+_SCAN_INTERVAL   = int(os.getenv("PRISM_SCAN_INTERVAL_SECONDS", "900"))
 
 _price_monitor: Optional[PriceMonitor] = None
 
@@ -108,15 +108,7 @@ def _on_ryde_event(event: dict) -> None:
 
 
 async def _prism_background_scan() -> None:
-    """
-    Signal API time-decay scanner.
-    Runs every PRISM_SCAN_INTERVAL_SECONDS (default 15 min).
-    Per-booking cadence inside scan_all_active() based on days_to_departure:
-      >= 14 days  ->  every 60 min
-       7-14 days  ->  every 30 min
-        < 7 days  ->  every 15 min
-    """
-    await asyncio.sleep(60)   # warm-up
+    await asyncio.sleep(60)
     while True:
         try:
             count = await scan_all_active()
@@ -131,15 +123,9 @@ async def _prism_background_scan() -> None:
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
-    """FastAPI lifespan handler."""
     global _loop, _market_task, _scan_task, _price_monitor
 
-    # -- Startup ----------------------------------------------------------------
     Path(_db_path).parent.mkdir(parents=True, exist_ok=True)
-
-    # No blocking DB call here. Any synchronous DB call in an async context
-    # freezes the entire event loop — Railway's healthcheck gets no response
-    # and kills the deployment. DB connects lazily on first real use instead.
 
     _price_monitor = PriceMonitor(store=_bookings, scan_interval=_SCAN_INTERVAL)
     _price_monitor.start()
@@ -154,9 +140,8 @@ async def _lifespan(app: FastAPI):
         extra={"db": "postgres" if os.getenv("DATABASE_URL") else "sqlite", "scan_interval_s": _SCAN_INTERVAL},
     )
 
-    yield  # -- Server is running -----------------------------------------------
+    yield
 
-    # -- Shutdown ---------------------------------------------------------------
     log.info("RYDE shutting down...")
     if _price_monitor is not None:
         _price_monitor.stop()
@@ -190,7 +175,6 @@ templates = Jinja2Templates(directory=template_dir)
 # ---------------------------------------------------------------------------
 
 def _db_ping() -> str:
-    """Synchronous DB ping — called via asyncio.to_thread so it never blocks the event loop."""
     try:
         with _bookings._lock:
             _bookings._execute("SELECT 1").fetchone()
@@ -203,8 +187,6 @@ def _db_ping() -> str:
 async def health():
     checks: dict = {}
     try:
-        # Run DB check in a thread pool with a hard 5-second cap so the event
-        # loop stays free and Railway always gets a response within the timeout.
         checks["db"] = await asyncio.wait_for(
             asyncio.to_thread(_db_ping), timeout=5.0
         )
@@ -213,7 +195,6 @@ async def health():
     checks["market"]     = "ok" if (_market_task and not _market_task.done()) else "stopped"
     checks["prism_scan"] = "ok" if (_scan_task   and not _scan_task.done())   else "stopped"
     overall = "ok" if all(v == "ok" for v in checks.values()) else "degraded"
-    # Always return 200 — Railway only checks the status code.
     return JSONResponse(
         status_code=200,
         content={"status": overall, "checks": checks, "timestamp": datetime.utcnow().isoformat() + "Z"},
@@ -274,7 +255,6 @@ def _require_agency_key(
     x_agency_key: Optional[str],
     x_api_key: Optional[str],
 ):
-    """Shared auth helper for dashboard JSON endpoints."""
     key = x_agency_key or x_api_key
     if not key:
         raise HTTPException(status_code=401, detail="Missing X-Agency-Key header.")
@@ -296,6 +276,8 @@ async def agency_dashboard_stats(
 ):
     agency_obj     = _require_agency_key(x_agency_key, x_api_key)
     agency         = agency_obj.name
+    tier           = agency_obj.subscription_tier
+    limits         = TIER_LIMITS.get(tier, TIER_LIMITS["free"])
     rows           = _bookings.get_by_agency(agency)
     last_decisions = _bookings.get_last_decision_by_agency(agency)
 
@@ -349,8 +331,8 @@ async def agency_dashboard_stats(
             "active_bookings": active_count,
             "strike_count":    strike_count,
             "total_savings":   round(total_savings, 2),
-            "net_profit":      round(total_savings * 0.80, 2),
-            "ryde_fees":       round(total_savings * 0.20, 2),
+            "plan":            tier,
+            "plan_limits":     limits,
         },
         "bookings": bookings_out,
     }
@@ -372,7 +354,6 @@ async def billing_setup_intent(
     x_agency_key: Optional[str] = Header(default=None),
     x_api_key:    Optional[str] = Header(default=None),
 ):
-    """Create (or reuse) a Stripe customer for this agency and return a SetupIntent client_secret."""
     agency_obj = _require_agency_key(x_agency_key, x_api_key)
     stripe_client = _get_stripe()
 
@@ -403,7 +384,6 @@ async def billing_setup_confirm(
     x_agency_key: Optional[str] = Header(default=None),
     x_api_key:    Optional[str] = Header(default=None),
 ):
-    """Set the confirmed payment method as the agency's default for off-session charges."""
     agency_obj = _require_agency_key(x_agency_key, x_api_key)
     body = await request.json()
     payment_method_id = body.get("payment_method_id")
@@ -425,10 +405,14 @@ async def agency_billing(
     x_agency_key: Optional[str] = Header(default=None),
     x_api_key:    Optional[str] = Header(default=None),
 ):
-    """Billing history + summary stats pulled from the audit log."""
     from datetime import timezone
     agency_obj = _require_agency_key(x_agency_key, x_api_key)
-    agency = agency_obj.name
+    agency     = agency_obj.name
+    tier       = agency_obj.subscription_tier
+    limits     = TIER_LIMITS.get(tier, TIER_LIMITS["free"])
+
+    rows         = _bookings.get_by_agency(agency)
+    active_count = sum(1 for r in rows if r.get("_active"))
 
     events = await asyncio.to_thread(_bookings.get_billing_events, agency)
 
@@ -468,9 +452,12 @@ async def agency_billing(
             failed_count  += 1
 
     return {
-        "agency":              agency,
-        "billing_configured":  agency_obj.stripe_customer_id is not None,
-        "card":                card,
+        "agency":             agency,
+        "billing_configured": agency_obj.stripe_customer_id is not None,
+        "card":               card,
+        "plan":               tier,
+        "plan_limits":        limits,
+        "bookings_used":      active_count,
         "summary": {
             "fees_this_month":    round(fees_this_month, 2),
             "outstanding_amount": round(outstanding_amount, 2),
@@ -522,7 +509,6 @@ async def signup_submit(
 
 @app.get("/register", response_class=HTMLResponse)
 async def register_form(request: Request):
-    # #7: surface a clean 503 rather than crashing later if Stripe is unconfigured
     if not os.getenv("STRIPE_SECRET_KEY"):
         return templates.TemplateResponse(
             request, "register.html",
@@ -541,7 +527,6 @@ async def register_submit(
     cancellation_fee: float = Form(...), booking_ref: str = Form(...),
     seat_preference: str = Form("cheapest"),
 ):
-    # #7: re-check key on POST so a mid-deploy config gap also returns a clean error
     if not os.getenv("STRIPE_SECRET_KEY"):
         return templates.TemplateResponse(
             request, "register.html",
@@ -549,7 +534,6 @@ async def register_submit(
             status_code=503,
         )
 
-    # #11: validate departure_date format and future-date constraint
     try:
         dep = datetime.strptime(departure_date, "%Y-%m-%d")
     except ValueError:
@@ -565,10 +549,6 @@ async def register_submit(
             status_code=422,
         )
 
-    # Bottom line #2: write to the DB first, then create the Stripe customer.
-    # If Stripe fails after a successful DB write we delete the local record and
-    # return an error — no orphan either side.  The previous order (Stripe first)
-    # left orphaned Stripe customers whenever the subsequent DB write failed.
     client_id    = str(uuid.uuid4())
     booking_data = {
         "origin":           origin.upper().strip(),

@@ -18,7 +18,7 @@
 <body class="bg-gray-950 text-gray-100 min-h-screen font-mono text-sm">
 
 <!-- ======================================================================
-     CONNECT MODAL  (shown until a valid key is stored)
+     CONNECT MODAL
 ====================================================================== -->
 <div id="connectModal"
      class="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm">
@@ -77,7 +77,7 @@
 
   <main class="flex-1 max-w-7xl mx-auto w-full px-6 py-7 space-y-6">
 
-    <!-- ── Stats Bar ─────────────────────────────────────────────────── -->
+    <!-- ── Stats Bar ──────────────────────────────────────────────── -->
     <div class="grid grid-cols-2 lg:grid-cols-4 gap-4">
       <div class="bg-gray-900 border border-gray-800 rounded-xl p-5 fade-in">
         <p class="text-xs text-gray-500 uppercase tracking-widest mb-1">Total Savings</p>
@@ -95,13 +95,13 @@
         <p class="text-xs text-gray-600 mt-1">rebook opportunities fired</p>
       </div>
       <div class="bg-gray-900 border border-gray-800 rounded-xl p-5 fade-in">
-        <p class="text-xs text-gray-500 uppercase tracking-widest mb-1">Net Profit</p>
-        <p class="text-2xl font-bold text-white">$<span id="sNet">&mdash;</span></p>
-        <p class="text-xs text-gray-600 mt-1">after RYDE 20% fee</p>
+        <p class="text-xs text-gray-500 uppercase tracking-widest mb-1">Plan</p>
+        <p id="sPlanBadge" class="text-2xl font-bold text-purple-400">&mdash;</p>
+        <p class="text-xs text-gray-600 mt-1"><span id="sPlanUsage">&mdash;</span> active bookings</p>
       </div>
     </div>
 
-    <!-- ── Bookings Table ────────────────────────────────────────────── -->
+    <!-- ── Bookings Table ─────────────────────────────────────────────── -->
     <div class="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden fade-in">
       <div class="flex items-center justify-between px-6 py-4 border-b border-gray-800">
         <h2 class="font-semibold">Monitored Portfolio</h2>
@@ -133,7 +133,7 @@
       </div>
     </div>
 
-    <!-- ── Price History Chart ───────────────────────────────────────── -->
+    <!-- ── Price History Chart ─────────────────────────────────────────── -->
     <div class="bg-gray-900 border border-gray-800 rounded-xl p-6 fade-in">
       <div class="flex items-start justify-between mb-5">
         <div>
@@ -154,24 +154,27 @@
       </div>
     </div>
 
-    <!-- ── Billing Summary Stats ─────────────────────────────────────── -->
+    <!-- ── Subscription Plan Stats ─────────────────────────────────────── -->
     <div>
-      <p class="text-xs text-gray-600 uppercase tracking-widest mb-3 px-0.5">Billing</p>
+      <p class="text-xs text-gray-600 uppercase tracking-widest mb-3 px-0.5">Subscription</p>
       <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
         <div class="bg-gray-900 border border-gray-800 rounded-xl p-5 fade-in">
-          <p class="text-xs text-gray-500 uppercase tracking-widest mb-1">Fees Paid — This Month</p>
-          <p class="text-2xl font-bold text-emerald-400">$<span id="bFeesMonth">&mdash;</span></p>
-          <p class="text-xs text-gray-600 mt-1">20% success fees charged</p>
+          <p class="text-xs text-gray-500 uppercase tracking-widest mb-1">Current Plan</p>
+          <p id="bPlanName" class="text-2xl font-bold text-purple-400">&mdash;</p>
+          <p class="text-xs text-gray-600 mt-1">flat monthly subscription</p>
         </div>
         <div class="bg-gray-900 border border-gray-800 rounded-xl p-5 fade-in">
-          <p class="text-xs text-gray-500 uppercase tracking-widest mb-1">Outstanding</p>
-          <p class="text-2xl font-bold text-yellow-400">$<span id="bOutstandingAmt">&mdash;</span></p>
-          <p class="text-xs text-gray-600 mt-1"><span id="bOutstandingCount">0</span> skipped — no card on file</p>
+          <p class="text-xs text-gray-500 uppercase tracking-widest mb-1">Bookings Used</p>
+          <p class="text-2xl font-bold text-blue-400">
+            <span id="bBookingsUsed">&mdash;</span>
+            <span class="text-base text-gray-500"> / <span id="bBookingsLimit">&mdash;</span></span>
+          </p>
+          <p class="text-xs text-gray-600 mt-1">active bookings monitored</p>
         </div>
         <div class="bg-gray-900 border border-gray-800 rounded-xl p-5 fade-in">
-          <p class="text-xs text-gray-500 uppercase tracking-widest mb-1">Failed — Needs Attention</p>
-          <p class="text-2xl font-bold text-red-400">$<span id="bFailedAmt">&mdash;</span></p>
-          <p class="text-xs text-gray-600 mt-1"><span id="bFailedCount">0</span> charge error(s)</p>
+          <p class="text-xs text-gray-500 uppercase tracking-widest mb-1">API Rate Limit</p>
+          <p id="bRateLimit" class="text-2xl font-bold text-emerald-400">&mdash;</p>
+          <p class="text-xs text-gray-600 mt-1">requests per 60 seconds</p>
         </div>
       </div>
     </div>
@@ -187,14 +190,13 @@
         </button>
       </div>
 
-      <!-- Current card display -->
       <div id="cardDisplay" class="px-6 py-5">
         <div id="noCard" class="flex items-center gap-3 text-yellow-500 text-xs">
           <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
                   d="M12 9v2m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/>
           </svg>
-          No payment method on file. Add a card so success fees can be charged automatically.
+          No payment method on file. Add a card to keep your subscription active.
         </div>
         <div id="hasCard" class="hidden flex items-center gap-4">
           <div class="bg-gray-800 border border-gray-700 rounded-lg px-4 py-3 flex items-center gap-3">
@@ -206,9 +208,8 @@
         </div>
       </div>
 
-      <!-- Stripe card entry form (hidden until opened) -->
       <div id="cardSetupPanel" class="hidden border-t border-gray-800 px-6 py-5">
-        <p class="text-xs text-gray-500 mb-4">Enter card details. Your card will be saved for automatic billing after each RYDE success.</p>
+        <p class="text-xs text-gray-500 mb-4">Enter card details. Your card will be saved for subscription billing.</p>
         <div id="stripeCardElement"
              class="bg-gray-800 border border-gray-700 rounded-lg px-4 py-3 mb-4"></div>
         <p id="cardSetupError" class="text-red-400 text-xs mb-3 hidden"></p>
@@ -227,7 +228,7 @@
       </div>
     </div>
 
-    <!-- ── Billing History ───────────────────────────────────────────── -->
+    <!-- ── Billing History ────────────────────────────────────────────── -->
     <div class="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden fade-in">
       <div class="flex items-center justify-between px-6 py-4 border-b border-gray-800">
         <h2 class="font-semibold">Billing History</h2>
@@ -248,7 +249,7 @@
           <tbody id="billTbody" class="divide-y divide-gray-800/60">
             <tr>
               <td colspan="6" class="px-6 py-8 text-center text-gray-600 text-xs">
-                Loading billing history&hellip;
+                No billing history on subscription plan.
               </td>
             </tr>
           </tbody>
@@ -268,7 +269,6 @@ let chart     = null;
 let timer     = null;
 let activeBid = null;
 
-// Stripe card setup state
 let _stripe       = null;
 let _cardEl       = null;
 let _clientSecret = null;
@@ -344,20 +344,27 @@ function scheduleRefresh() {
 // Render
 // ==========================================================================
 function render({ agency, stats, bookings }) {
-  // Header
   document.getElementById('hAgency').textContent = agency;
   document.getElementById('hUpdated').textContent =
     'Updated ' + new Date().toLocaleTimeString();
   document.getElementById('hUpdated').classList.remove('hidden');
 
-  // Stats cards
   document.getElementById('sSavings').textContent = usd(stats.total_savings);
   document.getElementById('sActive').textContent  = stats.active_bookings;
   document.getElementById('sStrikes').textContent = stats.strike_count;
-  document.getElementById('sNet').textContent     = usd(stats.net_profit);
   document.getElementById('bCount').textContent   = bookings.length;
 
-  // Table
+  // Plan card
+  if (stats.plan) {
+    document.getElementById('sPlanBadge').textContent = stats.plan.toUpperCase();
+  }
+  if (stats.plan_limits) {
+    const max = stats.plan_limits.max_bookings;
+    const used = stats.active_bookings;
+    document.getElementById('sPlanUsage').textContent =
+      used + (max > 0 ? ' / ' + max : '');
+  }
+
   const tbody = document.getElementById('tbody');
   if (!bookings.length) {
     tbody.innerHTML = `<tr><td colspan="8"
@@ -581,7 +588,7 @@ function ago(iso) {
 }
 
 // ==========================================================================
-// Billing
+// Billing / Subscription
 // ==========================================================================
 async function loadBilling() {
   try {
@@ -591,13 +598,17 @@ async function loadBilling() {
   } catch (e) { console.error('billing load failed', e); }
 }
 
-function renderBilling({ summary, card, events, billing_configured }) {
-  // Summary stats
-  document.getElementById('bFeesMonth').textContent      = usd(summary.fees_this_month);
-  document.getElementById('bOutstandingAmt').textContent  = usd(summary.outstanding_amount);
-  document.getElementById('bOutstandingCount').textContent = summary.outstanding_count;
-  document.getElementById('bFailedAmt').textContent       = usd(summary.failed_amount);
-  document.getElementById('bFailedCount').textContent     = summary.failed_count;
+function renderBilling({ card, events, plan, plan_limits, bookings_used }) {
+  // Subscription stats
+  if (plan) {
+    document.getElementById('bPlanName').textContent = plan.toUpperCase();
+  }
+  if (plan_limits) {
+    const limit = plan_limits.max_bookings;
+    document.getElementById('bBookingsUsed').textContent  = bookings_used ?? '—';
+    document.getElementById('bBookingsLimit').textContent = limit > 0 ? limit : '∞';
+    document.getElementById('bRateLimit').textContent     = plan_limits.rate_limit + '/min';
+  }
 
   // Payment method card
   const setupBtn = document.getElementById('cardSetupBtn');
@@ -622,7 +633,7 @@ function renderBilling({ summary, card, events, billing_configured }) {
   if (!events.length) {
     tbody.innerHTML = `<tr><td colspan="6"
       class="px-6 py-10 text-center text-gray-600 text-xs">
-      No billing events yet. They appear here after the first PRISM STRIKE.
+      No billing history.
     </td></tr>`;
     return;
   }
@@ -679,7 +690,6 @@ async function openCardSetup() {
   const err   = document.getElementById('cardSetupError');
   err.classList.add('hidden');
 
-  // Fetch SetupIntent from backend
   let si;
   try {
     const res = await fetch('/agency-dashboard/billing/setup-intent', {
@@ -749,17 +759,16 @@ async function saveCard() {
     return;
   }
 
-  // Tell backend to set this PM as the default
   try {
     await fetch('/agency-dashboard/billing/setup-confirm', {
       method:  'POST',
       headers: { 'X-Agency-Key': apiKey, 'Content-Type': 'application/json' },
       body:    JSON.stringify({ payment_method_id: setupIntent.payment_method }),
     });
-  } catch (e) { /* non-fatal — card is attached, default will be resolved on next charge */ }
+  } catch (e) { /* non-fatal */ }
 
   closeCardSetup();
-  loadBilling();  // refresh card display
+  loadBilling();
 }
 </script>
 </body>
