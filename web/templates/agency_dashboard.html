@@ -77,7 +77,7 @@
 
   <main class="flex-1 max-w-7xl mx-auto w-full px-6 py-7 space-y-6">
 
-    <!-- ── Stats Bar ──────────────────────────────────────────────── -->
+    <!-- Stats Bar -->
     <div class="grid grid-cols-2 lg:grid-cols-4 gap-4">
       <div class="bg-gray-900 border border-gray-800 rounded-xl p-5 fade-in">
         <p class="text-xs text-gray-500 uppercase tracking-widest mb-1">Total Savings</p>
@@ -101,7 +101,7 @@
       </div>
     </div>
 
-    <!-- ── Bookings Table ─────────────────────────────────────────────── -->
+    <!-- Bookings Table -->
     <div class="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden fade-in">
       <div class="flex items-center justify-between px-6 py-4 border-b border-gray-800">
         <h2 class="font-semibold">Monitored Portfolio</h2>
@@ -110,8 +110,7 @@
       <div class="overflow-x-auto">
         <table class="w-full">
           <thead>
-            <tr class="text-left text-xs text-gray-500 uppercase tracking-widest
-                       border-b border-gray-800/80">
+            <tr class="text-left text-xs text-gray-500 uppercase tracking-widest border-b border-gray-800/80">
               <th class="px-6 py-3">Route</th>
               <th class="px-6 py-3">Departure</th>
               <th class="px-6 py-3">Original</th>
@@ -123,38 +122,140 @@
             </tr>
           </thead>
           <tbody id="tbody" class="divide-y divide-gray-800/60">
-            <tr>
-              <td colspan="8" class="px-6 py-10 text-center text-gray-600 text-xs">
-                Loading portfolio&hellip;
-              </td>
-            </tr>
+            <tr><td colspan="8" class="px-6 py-10 text-center text-gray-600 text-xs">Loading portfolio&hellip;</td></tr>
           </tbody>
         </table>
       </div>
     </div>
 
-    <!-- ── Price History Chart ─────────────────────────────────────────── -->
+    <!-- Price History Chart -->
     <div class="bg-gray-900 border border-gray-800 rounded-xl p-6 fade-in">
       <div class="flex items-start justify-between mb-5">
         <div>
           <h2 class="font-semibold" id="chartTitle">Price History</h2>
-          <p class="text-xs text-gray-500 mt-0.5" id="chartSub">
-            Click a booking row to load its price chart
-          </p>
+          <p class="text-xs text-gray-500 mt-0.5" id="chartSub">Click a booking row to load its price chart</p>
         </div>
         <span id="chartMeta" class="text-xs text-gray-600 hidden"></span>
       </div>
       <div class="relative" style="height:260px">
         <canvas id="priceChart"></canvas>
-        <div id="chartEmpty"
-             class="absolute inset-0 flex items-center justify-center
-                    text-gray-600 text-xs text-center px-8">
+        <div id="chartEmpty" class="absolute inset-0 flex items-center justify-center text-gray-600 text-xs text-center px-8">
           Select a booking above to view its fare history
         </div>
       </div>
     </div>
 
-    <!-- ── Subscription Plan Stats ─────────────────────────────────────── -->
+    <!-- Notification Channels -->
+    <div class="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden fade-in">
+      <div class="flex items-center justify-between px-6 py-4 border-b border-gray-800">
+        <div>
+          <h2 class="font-semibold">STRIKE Notifications</h2>
+          <p class="text-xs text-gray-500 mt-0.5">Get alerted the moment PRISM fires a rebook signal</p>
+        </div>
+        <div id="notifActiveChips" class="flex gap-1.5"></div>
+      </div>
+
+      <div class="px-6 py-5 space-y-4">
+
+        <!-- Slack -->
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-3 items-start">
+          <div>
+            <p class="text-xs font-semibold text-gray-300 flex items-center gap-1.5">
+              <span class="text-lg">&#128279;</span> Slack
+            </p>
+            <p class="text-xs text-gray-600 mt-0.5">Paste an Incoming Webhook URL from your Slack workspace</p>
+          </div>
+          <div class="md:col-span-2">
+            <input id="nSlack" type="text" placeholder="https://hooks.slack.com/services/..."
+                   class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-xs font-mono
+                          focus:outline-none focus:border-emerald-500 transition-colors" />
+          </div>
+        </div>
+
+        <div class="border-t border-gray-800/60"></div>
+
+        <!-- Email -->
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-3 items-start">
+          <div>
+            <p class="text-xs font-semibold text-gray-300 flex items-center gap-1.5">
+              <span class="text-lg">&#9993;</span> Email
+            </p>
+            <p class="text-xs text-gray-600 mt-0.5">STRIKE alerts sent via SendGrid to this address</p>
+          </div>
+          <div class="md:col-span-2">
+            <input id="nEmail" type="email" placeholder="ops@youragency.com"
+                   class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-xs
+                          focus:outline-none focus:border-emerald-500 transition-colors" />
+          </div>
+        </div>
+
+        <div class="border-t border-gray-800/60"></div>
+
+        <!-- WhatsApp -->
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-3 items-start">
+          <div>
+            <p class="text-xs font-semibold text-gray-300 flex items-center gap-1.5">
+              <span class="text-lg">&#128241;</span> WhatsApp
+            </p>
+            <p class="text-xs text-gray-600 mt-0.5">Your WhatsApp number in E.164 format (via Twilio)</p>
+          </div>
+          <div class="md:col-span-2">
+            <input id="nWhatsapp" type="text" placeholder="+1 415 555 0123"
+                   class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-xs font-mono
+                          focus:outline-none focus:border-emerald-500 transition-colors" />
+            <p class="text-xs text-gray-700 mt-1">Requires TWILIO_* env vars configured in Railway</p>
+          </div>
+        </div>
+
+        <div class="border-t border-gray-800/60"></div>
+
+        <!-- Telegram -->
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-3 items-start">
+          <div>
+            <p class="text-xs font-semibold text-gray-300 flex items-center gap-1.5">
+              <span class="text-lg">&#128640;</span> Telegram
+            </p>
+            <p class="text-xs text-gray-600 mt-0.5">Paste your Telegram chat ID or group ID</p>
+          </div>
+          <div class="md:col-span-2">
+            <input id="nTelegram" type="text" placeholder="-1001234567890"
+                   class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-xs font-mono
+                          focus:outline-none focus:border-emerald-500 transition-colors" />
+            <p class="text-xs text-gray-700 mt-1">Requires TELEGRAM_BOT_TOKEN env var in Railway</p>
+          </div>
+        </div>
+
+        <div class="border-t border-gray-800/60"></div>
+
+        <!-- Webhook -->
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-3 items-start">
+          <div>
+            <p class="text-xs font-semibold text-gray-300 flex items-center gap-1.5">
+              <span class="text-lg">&#9881;</span> Webhook (default)
+            </p>
+            <p class="text-xs text-gray-600 mt-0.5">Fallback HMAC-signed HTTP POST for all decisions</p>
+          </div>
+          <div class="md:col-span-2">
+            <input id="nWebhook" type="text" placeholder="https://your-server.com/ryde-hook"
+                   class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-xs font-mono
+                          focus:outline-none focus:border-emerald-500 transition-colors" />
+          </div>
+        </div>
+
+        <!-- Save row -->
+        <div class="flex items-center gap-3 pt-1">
+          <button onclick="saveNotifications()"
+                  id="notifSaveBtn"
+                  class="px-5 py-2 bg-emerald-600 hover:bg-emerald-500 active:bg-emerald-700
+                         text-white text-xs font-semibold rounded-lg transition-colors">
+            Save Channels
+          </button>
+          <p id="notifMsg" class="text-xs hidden"></p>
+        </div>
+      </div>
+    </div>
+
+    <!-- Subscription Plan Stats -->
     <div>
       <p class="text-xs text-gray-600 uppercase tracking-widest mb-3 px-0.5">Subscription</p>
       <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
@@ -179,7 +280,7 @@
       </div>
     </div>
 
-    <!-- ── Payment Method ────────────────────────────────────────────── -->
+    <!-- Payment Method -->
     <div class="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden fade-in">
       <div class="flex items-center justify-between px-6 py-4 border-b border-gray-800">
         <h2 class="font-semibold">Payment Method</h2>
@@ -189,7 +290,6 @@
           + Add Card
         </button>
       </div>
-
       <div id="cardDisplay" class="px-6 py-5">
         <div id="noCard" class="flex items-center gap-3 text-yellow-500 text-xs">
           <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -207,28 +307,24 @@
           <span class="text-xs text-emerald-500">Active</span>
         </div>
       </div>
-
       <div id="cardSetupPanel" class="hidden border-t border-gray-800 px-6 py-5">
         <p class="text-xs text-gray-500 mb-4">Enter card details. Your card will be saved for subscription billing.</p>
-        <div id="stripeCardElement"
-             class="bg-gray-800 border border-gray-700 rounded-lg px-4 py-3 mb-4"></div>
+        <div id="stripeCardElement" class="bg-gray-800 border border-gray-700 rounded-lg px-4 py-3 mb-4"></div>
         <p id="cardSetupError" class="text-red-400 text-xs mb-3 hidden"></p>
         <div class="flex gap-2">
           <button id="saveCardBtn" onclick="saveCard()"
-                  class="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 active:bg-emerald-700
-                         text-white text-xs font-semibold rounded-lg transition-colors">
+                  class="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold rounded-lg transition-colors">
             Save Card
           </button>
           <button onclick="closeCardSetup()"
-                  class="px-4 py-2 border border-gray-700 hover:border-gray-500
-                         text-gray-500 hover:text-gray-300 text-xs rounded-lg transition-colors">
+                  class="px-4 py-2 border border-gray-700 hover:border-gray-500 text-gray-500 hover:text-gray-300 text-xs rounded-lg transition-colors">
             Cancel
           </button>
         </div>
       </div>
     </div>
 
-    <!-- ── Billing History ────────────────────────────────────────────── -->
+    <!-- Billing History -->
     <div class="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden fade-in">
       <div class="flex items-center justify-between px-6 py-4 border-b border-gray-800">
         <h2 class="font-semibold">Billing History</h2>
@@ -247,11 +343,7 @@
             </tr>
           </thead>
           <tbody id="billTbody" class="divide-y divide-gray-800/60">
-            <tr>
-              <td colspan="6" class="px-6 py-8 text-center text-gray-600 text-xs">
-                No billing history on subscription plan.
-              </td>
-            </tr>
+            <tr><td colspan="6" class="px-6 py-8 text-center text-gray-600 text-xs">No billing history.</td></tr>
           </tbody>
         </table>
       </div>
@@ -268,7 +360,6 @@ let apiKey    = null;
 let chart     = null;
 let timer     = null;
 let activeBid = null;
-
 let _stripe       = null;
 let _cardEl       = null;
 let _clientSecret = null;
@@ -282,20 +373,9 @@ let _clientSecret = null;
   else    { showModal(); }
 })();
 
-function showModal()  {
-  document.getElementById('connectModal').classList.remove('hidden');
-  document.getElementById('shell').classList.add('hidden');
-}
-function showShell()  {
-  document.getElementById('connectModal').classList.add('hidden');
-  document.getElementById('shell').classList.remove('hidden');
-}
-function disconnect() {
-  localStorage.removeItem('ryde_key');
-  apiKey = null;
-  if (timer) clearInterval(timer);
-  showModal();
-}
+function showModal()  { document.getElementById('connectModal').classList.remove('hidden'); document.getElementById('shell').classList.add('hidden'); }
+function showShell()  { document.getElementById('connectModal').classList.add('hidden'); document.getElementById('shell').classList.remove('hidden'); }
+function disconnect() { localStorage.removeItem('ryde_key'); apiKey = null; if (timer) clearInterval(timer); showModal(); }
 
 async function connectKey() {
   const k   = document.getElementById('keyInput').value.trim();
@@ -304,22 +384,10 @@ async function connectKey() {
   if (!k) return false;
   try {
     const res = await fetch('/agency-dashboard/stats', { headers: { 'X-Agency-Key': k } });
-    if (!res.ok) {
-      err.textContent = res.status === 401 || res.status === 403
-        ? 'Invalid or revoked API key.' : 'Server error — please try again.';
-      err.classList.remove('hidden');
-      return false;
-    }
-    apiKey = k;
-    localStorage.setItem('ryde_key', k);
-    showShell();
-    const data = await res.json();
-    render(data);
-    scheduleRefresh();
-  } catch (e) {
-    err.textContent = 'Network error — check your connection.';
-    err.classList.remove('hidden');
-  }
+    if (!res.ok) { err.textContent = res.status === 401 || res.status === 403 ? 'Invalid or revoked API key.' : 'Server error.'; err.classList.remove('hidden'); return false; }
+    apiKey = k; localStorage.setItem('ryde_key', k); showShell();
+    render(await res.json()); scheduleRefresh();
+  } catch (e) { err.textContent = 'Network error.'; err.classList.remove('hidden'); }
   return false;
 }
 
@@ -333,94 +401,51 @@ async function loadAll() {
     render(await res.json());
   } catch (e) { console.error('dashboard load failed', e); }
   loadBilling();
+  loadNotifications();
 }
 
-function scheduleRefresh() {
-  if (timer) clearInterval(timer);
-  timer = setInterval(loadAll, 60_000);
-}
+function scheduleRefresh() { if (timer) clearInterval(timer); timer = setInterval(loadAll, 60_000); }
 
 // ==========================================================================
 // Render
 // ==========================================================================
 function render({ agency, stats, bookings }) {
-  document.getElementById('hAgency').textContent = agency;
-  document.getElementById('hUpdated').textContent =
-    'Updated ' + new Date().toLocaleTimeString();
+  document.getElementById('hAgency').textContent  = agency;
+  document.getElementById('hUpdated').textContent = 'Updated ' + new Date().toLocaleTimeString();
   document.getElementById('hUpdated').classList.remove('hidden');
-
   document.getElementById('sSavings').textContent = usd(stats.total_savings);
   document.getElementById('sActive').textContent  = stats.active_bookings;
   document.getElementById('sStrikes').textContent = stats.strike_count;
   document.getElementById('bCount').textContent   = bookings.length;
 
-  // Plan card
-  if (stats.plan) {
-    document.getElementById('sPlanBadge').textContent = stats.plan.toUpperCase();
-  }
+  if (stats.plan) document.getElementById('sPlanBadge').textContent = stats.plan.toUpperCase();
   if (stats.plan_limits) {
     const max = stats.plan_limits.max_bookings;
-    const used = stats.active_bookings;
-    document.getElementById('sPlanUsage').textContent =
-      used + (max > 0 ? ' / ' + max : '');
+    document.getElementById('sPlanUsage').textContent = stats.active_bookings + (max > 0 ? ' / ' + max : '');
   }
 
   const tbody = document.getElementById('tbody');
   if (!bookings.length) {
-    tbody.innerHTML = `<tr><td colspan="8"
-      class="px-6 py-12 text-center text-gray-600 text-xs">
-      No bookings yet &mdash; submit your first via
-      <code class="text-gray-500">POST /api/v1/monitor</code>.
-    </td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="8" class="px-6 py-12 text-center text-gray-600 text-xs">No bookings yet &mdash; submit via <code class="text-gray-500">POST /api/v1/monitor</code>.</td></tr>`;
     return;
   }
-
   tbody.innerHTML = bookings.map(b => {
-    const raw    = b.original_price && b.current_price != null
-      ? (b.original_price - b.current_price - (b.cancellation_fee || 0)) : null;
+    const raw    = b.original_price && b.current_price != null ? (b.original_price - b.current_price - (b.cancellation_fee || 0)) : null;
     const saving = raw !== null ? raw.toFixed(2) : null;
-    const sColor = saving !== null
-      ? (raw > 0 ? 'text-emerald-400' : raw < 0 ? 'text-red-400' : 'text-gray-500')
-      : 'text-gray-600';
-
+    const sColor = saving !== null ? (raw > 0 ? 'text-emerald-400' : raw < 0 ? 'text-red-400' : 'text-gray-500') : 'text-gray-600';
     return `
-<tr data-bid="${b.booking_id}"
-    data-origin="${b.origin}" data-dest="${b.destination}"
-    data-dep="${b.departure_date}" data-orig-price="${b.original_price}"
-    data-route="${b.route}"
-    class="hover:bg-gray-800/40 transition-colors cursor-default
-           ${activeBid === b.booking_id ? 'bg-gray-800/60' : ''}">
-  <td class="px-6 py-3.5">
-    <div class="font-semibold tracking-wide">${b.route}</div>
-    <div class="text-xs text-gray-600 mt-0.5">${b.booking_id.slice(0,20)}&hellip;</div>
-  </td>
+<tr data-bid="${b.booking_id}" data-origin="${b.origin}" data-dest="${b.destination}" data-dep="${b.departure_date}" data-orig-price="${b.original_price}" data-route="${b.route}"
+    class="hover:bg-gray-800/40 transition-colors cursor-default ${activeBid === b.booking_id ? 'bg-gray-800/60' : ''}">
+  <td class="px-6 py-3.5"><div class="font-semibold tracking-wide">${b.route}</div><div class="text-xs text-gray-600 mt-0.5">${b.booking_id.slice(0,20)}&hellip;</div></td>
   <td class="px-6 py-3.5 text-gray-300">${b.departure_date}</td>
   <td class="px-6 py-3.5">$${b.original_price.toFixed(2)}</td>
-  <td class="px-6 py-3.5">
-    ${b.current_price != null
-      ? '$' + parseFloat(b.current_price).toFixed(2)
-      : '<span class="text-gray-600">&mdash;</span>'}
-  </td>
-  <td class="px-6 py-3.5 ${sColor}">
-    ${saving !== null
-      ? (raw > 0 ? '+$' + saving : '$' + saving)
-      : '<span class="text-gray-600">&mdash;</span>'}
-  </td>
+  <td class="px-6 py-3.5">${b.current_price != null ? '$' + parseFloat(b.current_price).toFixed(2) : '<span class="text-gray-600">&mdash;</span>'}</td>
+  <td class="px-6 py-3.5 ${sColor}">${saving !== null ? (raw > 0 ? '+$' + saving : '$' + saving) : '<span class="text-gray-600">&mdash;</span>'}</td>
   <td class="px-6 py-3.5">${badge(b.status)}</td>
-  <td class="px-6 py-3.5 text-xs text-gray-500">
-    ${b.last_evaluated_at ? ago(b.last_evaluated_at) : '&mdash;'}
-  </td>
-  <td class="px-6 py-3.5">
-    <button onclick="selectRow(this.closest('tr'))"
-            class="text-xs text-gray-600 hover:text-emerald-400
-                   border border-gray-800 hover:border-emerald-700
-                   px-2.5 py-1 rounded-md transition-colors">
-      &nearr; Chart
-    </button>
-  </td>
+  <td class="px-6 py-3.5 text-xs text-gray-500">${b.last_evaluated_at ? ago(b.last_evaluated_at) : '&mdash;'}</td>
+  <td class="px-6 py-3.5"><button onclick="selectRow(this.closest('tr'))" class="text-xs text-gray-600 hover:text-emerald-400 border border-gray-800 hover:border-emerald-700 px-2.5 py-1 rounded-md transition-colors">&nearr; Chart</button></td>
 </tr>`;
   }).join('');
-
   scheduleRefresh();
 }
 
@@ -428,163 +453,112 @@ function render({ agency, stats, bookings }) {
 // Chart
 // ==========================================================================
 function selectRow(row) {
-  document.querySelectorAll('#tbody tr').forEach(r =>
-    r.classList.remove('bg-gray-800/60'));
-  row.classList.add('bg-gray-800/60');
-  activeBid = row.dataset.bid;
-  loadChart(row.dataset);
+  document.querySelectorAll('#tbody tr').forEach(r => r.classList.remove('bg-gray-800/60'));
+  row.classList.add('bg-gray-800/60'); activeBid = row.dataset.bid; loadChart(row.dataset);
 }
-
 async function loadChart({ origin, dest, dep, origPrice, route }) {
   const routeKey = `${origin}-${dest}-${dep}`;
   document.getElementById('chartTitle').textContent = `Price History — ${route}`;
   document.getElementById('chartSub').textContent   = `departure ${dep}`;
   document.getElementById('chartEmpty').classList.add('hidden');
-
   try {
-    const res  = await fetch(`/agency-dashboard/price-history/${routeKey}`,
-                             { headers: { 'X-Agency-Key': apiKey } });
+    const res  = await fetch(`/agency-dashboard/price-history/${routeKey}`, { headers: { 'X-Agency-Key': apiKey } });
     const data = await res.json();
-
-    if (!data.points || data.points.length === 0) {
-      document.getElementById('chartEmpty').textContent =
-        'No price snapshots yet. Data is recorded each time PRISM evaluates this booking.';
+    if (!data.points || !data.points.length) {
+      document.getElementById('chartEmpty').textContent = 'No price snapshots yet.';
       document.getElementById('chartEmpty').classList.remove('hidden');
-      if (chart) { chart.destroy(); chart = null; }
-      return;
+      if (chart) { chart.destroy(); chart = null; } return;
     }
-
-    document.getElementById('chartMeta').textContent =
-      `${data.count} snapshot${data.count !== 1 ? 's' : ''}`;
+    document.getElementById('chartMeta').textContent = `${data.count} snapshot${data.count !== 1 ? 's' : ''}`;
     document.getElementById('chartMeta').classList.remove('hidden');
-
-    const labels = data.points.map(p => {
-      const d = new Date(p.timestamp);
-      return d.toLocaleDateString('en-US', {
-        month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'
-      });
-    });
-    const prices = data.points.map(p => p.price);
-    const orig   = parseFloat(origPrice);
-    drawChart(labels, prices, orig);
+    drawChart(
+      data.points.map(p => new Date(p.timestamp).toLocaleDateString('en-US', { month:'short', day:'numeric', hour:'2-digit', minute:'2-digit' })),
+      data.points.map(p => p.price), parseFloat(origPrice)
+    );
   } catch (e) { console.error('chart load failed', e); }
 }
-
 function drawChart(labels, prices, originalPrice) {
   const ctx = document.getElementById('priceChart').getContext('2d');
   if (chart) chart.destroy();
-
-  const lo = Math.min(...prices, originalPrice) * 0.94;
-  const hi = Math.max(...prices, originalPrice) * 1.06;
-  const sparse = prices.length > 50;
-
-  chart = new Chart(ctx, {
-    type: 'line',
-    data: {
-      labels,
-      datasets: [
-        {
-          label: 'Market Price',
-          data: prices,
-          borderColor: '#10b981',
-          backgroundColor: 'rgba(16,185,129,0.07)',
-          borderWidth: 2,
-          pointRadius: sparse ? 0 : 3,
-          pointHoverRadius: 5,
-          pointBackgroundColor: '#10b981',
-          fill: true,
-          tension: 0.35,
-        },
-        {
-          label: 'Original Price',
-          data: Array(labels.length).fill(originalPrice),
-          borderColor: 'rgba(107,114,128,0.6)',
-          borderWidth: 1.5,
-          borderDash: [5, 4],
-          pointRadius: 0,
-          fill: false,
-        },
-      ],
-    },
-    options: {
-      responsive: true,
-      maintainAspectRatio: false,
-      interaction: { mode: 'index', intersect: false },
-      plugins: {
-        legend: {
-          labels: {
-            color: '#6b7280',
-            font: { size: 11, family: 'monospace' },
-            boxWidth: 14,
-          },
-        },
-        tooltip: {
-          backgroundColor: '#111827',
-          titleColor: '#f9fafb',
-          bodyColor: '#d1d5db',
-          borderColor: '#1f2937',
-          borderWidth: 1,
-          padding: 10,
-          callbacks: {
-            label: c => ` $${c.parsed.y.toFixed(2)}`,
-          },
-        },
-      },
-      scales: {
-        x: {
-          ticks: {
-            color: '#4b5563',
-            font: { size: 10, family: 'monospace' },
-            maxTicksLimit: 8,
-            maxRotation: 0,
-          },
-          grid: { color: 'rgba(31,41,55,0.8)' },
-        },
-        y: {
-          min: lo,
-          max: hi,
-          ticks: {
-            color: '#4b5563',
-            font: { size: 10, family: 'monospace' },
-            callback: v => '$' + v.toFixed(0),
-          },
-          grid: { color: 'rgba(31,41,55,0.8)' },
-        },
-      },
-    },
-  });
+  chart = new Chart(ctx, { type:'line', data:{ labels, datasets:[
+    { label:'Market Price', data:prices, borderColor:'#10b981', backgroundColor:'rgba(16,185,129,0.07)', borderWidth:2, pointRadius: prices.length>50?0:3, pointHoverRadius:5, fill:true, tension:0.35 },
+    { label:'Original Price', data:Array(labels.length).fill(originalPrice), borderColor:'rgba(107,114,128,0.6)', borderWidth:1.5, borderDash:[5,4], pointRadius:0, fill:false }
+  ]}, options:{ responsive:true, maintainAspectRatio:false, interaction:{mode:'index',intersect:false},
+    plugins:{ legend:{labels:{color:'#6b7280',font:{size:11,family:'monospace'},boxWidth:14}},
+      tooltip:{backgroundColor:'#111827',titleColor:'#f9fafb',bodyColor:'#d1d5db',borderColor:'#1f2937',borderWidth:1,padding:10,callbacks:{label:c=>` $${c.parsed.y.toFixed(2)}`}} },
+    scales:{ x:{ticks:{color:'#4b5563',font:{size:10,family:'monospace'},maxTicksLimit:8,maxRotation:0},grid:{color:'rgba(31,41,55,0.8)'}},
+             y:{min:Math.min(...prices,originalPrice)*0.94,max:Math.max(...prices,originalPrice)*1.06,ticks:{color:'#4b5563',font:{size:10,family:'monospace'},callback:v=>'$'+v.toFixed(0)},grid:{color:'rgba(31,41,55,0.8)'}} } } });
 }
 
 // ==========================================================================
 // Helpers
 // ==========================================================================
 function badge(status) {
-  const MAP = {
-    STRIKE:       ['bg-emerald-950 text-emerald-400 border-emerald-800', '&#9679; STRIKE'],
-    PHANTOM_HOLD: ['bg-yellow-950 text-yellow-400 border-yellow-800',   '&#9682; HOLD'],
-    MONITORING:   ['bg-blue-950 text-blue-400 border-blue-800',         '&#9676; MONITORING'],
-    STOPPED:      ['bg-gray-800 text-gray-500 border-gray-700',         '&mdash; STOPPED'],
-  };
+  const MAP = { STRIKE:['bg-emerald-950 text-emerald-400 border-emerald-800','&#9679; STRIKE'], PHANTOM_HOLD:['bg-yellow-950 text-yellow-400 border-yellow-800','&#9682; HOLD'], MONITORING:['bg-blue-950 text-blue-400 border-blue-800','&#9676; MONITORING'], STOPPED:['bg-gray-800 text-gray-500 border-gray-700','&mdash; STOPPED'] };
   const [cls, label] = MAP[status] || MAP.MONITORING;
-  return `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-md border
-                       text-xs font-mono ${cls}">${label}</span>`;
+  return `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-md border text-xs font-mono ${cls}">${label}</span>`;
 }
+function usd(n) { if (n==null) return '—'; return parseFloat(n).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}); }
+function ago(iso) { try { const m=Math.floor((Date.now()-new Date(iso).getTime())/60_000); if(m<1) return 'just now'; if(m<60) return `${m}m ago`; const h=Math.floor(m/60); if(h<24) return `${h}h ago`; return `${Math.floor(h/24)}d ago`; } catch { return iso; } }
 
-function usd(n) {
-  if (n == null) return '—';
-  return parseFloat(n).toLocaleString('en-US',
-    { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-}
-
-function ago(iso) {
+// ==========================================================================
+// Notifications
+// ==========================================================================
+async function loadNotifications() {
   try {
-    const m = Math.floor((Date.now() - new Date(iso).getTime()) / 60_000);
-    if (m < 1)  return 'just now';
-    if (m < 60) return `${m}m ago`;
-    const h = Math.floor(m / 60);
-    if (h < 24) return `${h}h ago`;
-    return `${Math.floor(h / 24)}d ago`;
-  } catch { return iso; }
+    const res = await fetch('/agency-dashboard/notifications', { headers: { 'X-Agency-Key': apiKey } });
+    if (!res.ok) return;
+    const data = await res.json();
+    // Populate inputs with masked/current values
+    document.getElementById('nSlack').placeholder    = data.slack_webhook    ? data.slack_webhook    : 'https://hooks.slack.com/services/...';
+    document.getElementById('nEmail').value          = data.email            || '';
+    document.getElementById('nWhatsapp').value       = data.whatsapp_to      || '';
+    document.getElementById('nTelegram').value       = data.telegram_chat_id || '';
+    document.getElementById('nWebhook').placeholder  = data.webhook_url      ? data.webhook_url      : 'https://your-server.com/ryde-hook';
+
+    // Active channel chips
+    const chips = document.getElementById('notifActiveChips');
+    const ICONS = { slack_webhook:'🔗 Slack', email:'✉ Email', whatsapp_to:'📱 WA', telegram_chat_id:'🚀 Telegram', webhook_url:'⚙ Webhook' };
+    chips.innerHTML = (data.channels_active || []).map(ch =>
+      `<span class="text-xs px-2 py-0.5 rounded-full bg-emerald-950 text-emerald-400 border border-emerald-800">${ICONS[ch] || ch}</span>`
+    ).join('');
+  } catch (e) { console.error('notifications load failed', e); }
+}
+
+async function saveNotifications() {
+  const btn = document.getElementById('notifSaveBtn');
+  const msg = document.getElementById('notifMsg');
+  btn.disabled = true; btn.textContent = 'Saving…'; msg.classList.add('hidden');
+
+  const body = {
+    slack_webhook:    document.getElementById('nSlack').value.trim(),
+    email:            document.getElementById('nEmail').value.trim(),
+    whatsapp_to:      document.getElementById('nWhatsapp').value.trim(),
+    telegram_chat_id: document.getElementById('nTelegram').value.trim(),
+    webhook_url:      document.getElementById('nWebhook').value.trim(),
+  };
+
+  try {
+    const res = await fetch('/agency-dashboard/notifications', {
+      method: 'POST',
+      headers: { 'X-Agency-Key': apiKey, 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const data = await res.json();
+    if (res.ok) {
+      msg.textContent = `✓ Saved. Active: ${data.channels_active.length ? data.channels_active.join(', ') : 'none'}`;
+      msg.className = 'text-xs text-emerald-400';
+    } else {
+      msg.textContent = data.detail || 'Save failed.';
+      msg.className = 'text-xs text-red-400';
+    }
+  } catch (e) {
+    msg.textContent = 'Network error.';
+    msg.className = 'text-xs text-red-400';
+  }
+  msg.classList.remove('hidden');
+  btn.disabled = false; btn.textContent = 'Save Channels';
+  loadNotifications();
 }
 
 // ==========================================================================
@@ -597,178 +571,81 @@ async function loadBilling() {
     renderBilling(await res.json());
   } catch (e) { console.error('billing load failed', e); }
 }
-
 function renderBilling({ card, events, plan, plan_limits, bookings_used }) {
-  // Subscription stats
-  if (plan) {
-    document.getElementById('bPlanName').textContent = plan.toUpperCase();
-  }
+  if (plan) document.getElementById('bPlanName').textContent = plan.toUpperCase();
   if (plan_limits) {
     const limit = plan_limits.max_bookings;
     document.getElementById('bBookingsUsed').textContent  = bookings_used ?? '—';
     document.getElementById('bBookingsLimit').textContent = limit > 0 ? limit : '∞';
     document.getElementById('bRateLimit').textContent     = plan_limits.rate_limit + '/min';
   }
-
-  // Payment method card
   const setupBtn = document.getElementById('cardSetupBtn');
   if (card) {
     document.getElementById('noCard').classList.add('hidden');
     document.getElementById('hasCard').classList.remove('hidden');
     document.getElementById('cardBrand').textContent = card.brand;
     document.getElementById('cardLast4').textContent = card.last4;
-    document.getElementById('cardExp').textContent   =
-      `${String(card.exp_month).padStart(2,'0')}/${String(card.exp_year).slice(-2)}`;
+    document.getElementById('cardExp').textContent   = `${String(card.exp_month).padStart(2,'0')}/${String(card.exp_year).slice(-2)}`;
     setupBtn.textContent = '✎ Update Card';
   } else {
     document.getElementById('noCard').classList.remove('hidden');
     document.getElementById('hasCard').classList.add('hidden');
     setupBtn.textContent = '+ Add Card';
   }
-
-  // Billing history table
   const tbody = document.getElementById('billTbody');
   document.getElementById('billCount').textContent = events.length;
-
-  if (!events.length) {
-    tbody.innerHTML = `<tr><td colspan="6"
-      class="px-6 py-10 text-center text-gray-600 text-xs">
-      No billing history.
-    </td></tr>`;
-    return;
-  }
-
+  if (!events.length) { tbody.innerHTML = `<tr><td colspan="6" class="px-6 py-10 text-center text-gray-600 text-xs">No billing history.</td></tr>`; return; }
   tbody.innerHTML = events.map(ev => {
-    const d   = ev.detail;
-    const pi  = d.stripe_payment_intent;
-    const piLink = pi
-      ? `<a href="https://dashboard.stripe.com/payments/${pi}" target="_blank"
-              class="text-blue-400 hover:text-blue-300 font-mono text-xs underline
-                     underline-offset-2">${pi.slice(0,14)}&hellip;</a>`
-      : `<span class="text-gray-600">&mdash;</span>`;
-
-    return `
-<tr class="hover:bg-gray-800/30 transition-colors">
+    const d = ev.detail, pi = d.stripe_payment_intent;
+    const piLink = pi ? `<a href="https://dashboard.stripe.com/payments/${pi}" target="_blank" class="text-blue-400 hover:text-blue-300 font-mono text-xs underline underline-offset-2">${pi.slice(0,14)}&hellip;</a>` : `<span class="text-gray-600">&mdash;</span>`;
+    return `<tr class="hover:bg-gray-800/30 transition-colors">
   <td class="px-6 py-3.5 text-xs text-gray-500 whitespace-nowrap">${fmtDate(ev.timestamp)}</td>
   <td class="px-6 py-3.5 font-mono text-xs text-gray-400">${ev.booking_id.slice(0,20)}&hellip;</td>
-  <td class="px-6 py-3.5 text-emerald-400">
-    ${d.net_savings != null ? '$' + parseFloat(d.net_savings).toFixed(2) : '&mdash;'}
-  </td>
-  <td class="px-6 py-3.5">
-    ${d.fee_usd != null ? '$' + parseFloat(d.fee_usd).toFixed(2) : '&mdash;'}
-  </td>
+  <td class="px-6 py-3.5 text-emerald-400">${d.net_savings != null ? '$' + parseFloat(d.net_savings).toFixed(2) : '&mdash;'}</td>
+  <td class="px-6 py-3.5">${d.fee_usd != null ? '$' + parseFloat(d.fee_usd).toFixed(2) : '&mdash;'}</td>
   <td class="px-6 py-3.5">${billBadge(ev.event)}</td>
   <td class="px-6 py-3.5">${piLink}</td>
 </tr>`;
   }).join('');
 }
-
 function billBadge(event) {
-  const MAP = {
-    billing_charged: ['bg-emerald-950 text-emerald-400 border-emerald-800', 'Charged'],
-    billing_error:   ['bg-red-950 text-red-400 border-red-800',             'Failed'],
-    billing_skipped: ['bg-yellow-950 text-yellow-400 border-yellow-800',    'Skipped'],
-  };
+  const MAP = { billing_charged:['bg-emerald-950 text-emerald-400 border-emerald-800','Charged'], billing_error:['bg-red-950 text-red-400 border-red-800','Failed'], billing_skipped:['bg-yellow-950 text-yellow-400 border-yellow-800','Skipped'] };
   const [cls, label] = MAP[event] || ['bg-gray-800 text-gray-500 border-gray-700', event];
-  return `<span class="inline-flex items-center px-2 py-0.5 rounded-md border
-                       text-xs font-mono ${cls}">${label}</span>`;
+  return `<span class="inline-flex items-center px-2 py-0.5 rounded-md border text-xs font-mono ${cls}">${label}</span>`;
 }
-
-function fmtDate(iso) {
-  try {
-    return new Date(iso).toLocaleString('en-US', {
-      month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'
-    });
-  } catch { return iso; }
-}
+function fmtDate(iso) { try { return new Date(iso).toLocaleString('en-US',{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}); } catch { return iso; } }
 
 // ==========================================================================
-// Card setup (Stripe SetupIntent)
+// Card setup (Stripe)
 // ==========================================================================
 async function openCardSetup() {
-  const panel = document.getElementById('cardSetupPanel');
-  const err   = document.getElementById('cardSetupError');
+  const panel = document.getElementById('cardSetupPanel'), err = document.getElementById('cardSetupError');
   err.classList.add('hidden');
-
   let si;
   try {
-    const res = await fetch('/agency-dashboard/billing/setup-intent', {
-      method: 'POST',
-      headers: { 'X-Agency-Key': apiKey },
-    });
-    if (!res.ok) {
-      const body = await res.json().catch(() => ({}));
-      err.textContent = body.detail || 'Could not initialise card setup — is STRIPE_SECRET_KEY configured?';
-      err.classList.remove('hidden');
-      panel.classList.remove('hidden');
-      return;
-    }
+    const res = await fetch('/agency-dashboard/billing/setup-intent', { method:'POST', headers:{'X-Agency-Key':apiKey} });
+    if (!res.ok) { const b = await res.json().catch(()=>({})); err.textContent = b.detail||'Could not initialise card setup.'; err.classList.remove('hidden'); panel.classList.remove('hidden'); return; }
     si = await res.json();
-  } catch (e) {
-    err.textContent = 'Network error contacting billing endpoint.';
-    err.classList.remove('hidden');
-    panel.classList.remove('hidden');
-    return;
-  }
-
-  _clientSecret = si.client_secret;
-  _stripe = Stripe(si.publishable_key);
-
+  } catch (e) { err.textContent = 'Network error.'; err.classList.remove('hidden'); panel.classList.remove('hidden'); return; }
+  _clientSecret = si.client_secret; _stripe = Stripe(si.publishable_key);
   const elements = _stripe.elements();
-  _cardEl = elements.create('card', {
-    style: {
-      base: {
-        color: '#f9fafb',
-        fontFamily: 'ui-monospace, monospace',
-        fontSize: '14px',
-        '::placeholder': { color: '#4b5563' },
-      },
-      invalid: { color: '#f87171' },
-    },
-  });
-  _cardEl.mount('#stripeCardElement');
-  panel.classList.remove('hidden');
-  document.getElementById('stripeCardElement').scrollIntoView({ behavior: 'smooth', block: 'center' });
+  _cardEl = elements.create('card', { style:{base:{color:'#f9fafb',fontFamily:'ui-monospace, monospace',fontSize:'14px','::placeholder':{color:'#4b5563'}},invalid:{color:'#f87171'}} });
+  _cardEl.mount('#stripeCardElement'); panel.classList.remove('hidden');
+  document.getElementById('stripeCardElement').scrollIntoView({behavior:'smooth',block:'center'});
 }
-
 function closeCardSetup() {
   document.getElementById('cardSetupPanel').classList.add('hidden');
   document.getElementById('cardSetupError').classList.add('hidden');
-  if (_cardEl) { _cardEl.destroy(); _cardEl = null; }
-  _clientSecret = null;
-  _stripe = null;
+  if (_cardEl) { _cardEl.destroy(); _cardEl = null; } _clientSecret = null; _stripe = null;
 }
-
 async function saveCard() {
   if (!_stripe || !_cardEl || !_clientSecret) return;
-  const btn = document.getElementById('saveCardBtn');
-  const err = document.getElementById('cardSetupError');
-  btn.disabled = true;
-  btn.textContent = 'Saving…';
-  err.classList.add('hidden');
-
-  const { setupIntent, error } = await _stripe.confirmCardSetup(_clientSecret, {
-    payment_method: { card: _cardEl },
-  });
-
-  if (error) {
-    err.textContent = error.message;
-    err.classList.remove('hidden');
-    btn.disabled = false;
-    btn.textContent = 'Save Card';
-    return;
-  }
-
-  try {
-    await fetch('/agency-dashboard/billing/setup-confirm', {
-      method:  'POST',
-      headers: { 'X-Agency-Key': apiKey, 'Content-Type': 'application/json' },
-      body:    JSON.stringify({ payment_method_id: setupIntent.payment_method }),
-    });
-  } catch (e) { /* non-fatal */ }
-
-  closeCardSetup();
-  loadBilling();
+  const btn = document.getElementById('saveCardBtn'), err = document.getElementById('cardSetupError');
+  btn.disabled = true; btn.textContent = 'Saving…'; err.classList.add('hidden');
+  const { setupIntent, error } = await _stripe.confirmCardSetup(_clientSecret, { payment_method:{card:_cardEl} });
+  if (error) { err.textContent = error.message; err.classList.remove('hidden'); btn.disabled=false; btn.textContent='Save Card'; return; }
+  try { await fetch('/agency-dashboard/billing/setup-confirm',{method:'POST',headers:{'X-Agency-Key':apiKey,'Content-Type':'application/json'},body:JSON.stringify({payment_method_id:setupIntent.payment_method})}); } catch(e){}
+  closeCardSetup(); loadBilling();
 }
 </script>
 </body>
