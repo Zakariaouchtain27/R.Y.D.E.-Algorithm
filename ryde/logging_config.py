@@ -14,10 +14,10 @@ _SKIP_KEYS = frozenset({
 class _JsonFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
         out: dict = {
-            "ts":      datetime.fromtimestamp(record.created, tz=timezone.utc).isoformat(),
-            "level":   record.levelname,
-            "logger":  record.name,
-            "msg":     record.getMessage(),
+            "ts":     datetime.fromtimestamp(record.created, tz=timezone.utc).isoformat(),
+            "level":  record.levelname,
+            "logger": record.name,
+            "msg":    record.getMessage(),
         }
         if record.exc_info:
             out["exception"] = self.formatException(record.exc_info)
@@ -35,6 +35,9 @@ def setup_logging(level: str = "INFO") -> None:
         handlers=[handler],
         force=True,
     )
+    # Suppress high-volume / low-value loggers
     logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
     logging.getLogger("uvicorn.error").setLevel(logging.INFO)
+    logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
+    logging.getLogger("sqlalchemy.pool").setLevel(logging.WARNING)
     logging.getLogger("apscheduler").setLevel(logging.WARNING)
