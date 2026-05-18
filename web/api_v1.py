@@ -9,24 +9,13 @@ Subscription tiers
   starter  — 25 active bookings, 60 req/60 s  ($49/mo)
   pro      — unlimited bookings, 120 req/60 s  ($149/mo)
 
-How PRISM evaluation works
---------------------------
-PRISM (Longstaff-Schwartz Monte Carlo) runs automatically whenever a
-current_price is provided:
-
-  POST /monitor           — include current_price to evaluate on submit
-  PATCH /bookings/{id}    — push a new current_price to re-evaluate
-
-Webhook security
------------------
-Every webhook POST is signed:
-  X-RYDE-Signature: sha256=<hmac-sha256-hex>
-Verify with: hmac.new(RYDE_WEBHOOK_SECRET, body, sha256).hexdigest()
-
-Idempotency
------------
-POST /monitor accepts an optional  Idempotency-Key: <uuid>  header.
-Returns the original 201 response on duplicate keys — safe to retry.
+Notification channels (per-agency, configured in dashboard)
+------------------------------------------------------------
+  Webhook   — HMAC-signed HTTP POST to booking.notify_webhook
+  Slack     — Incoming Webhook URL
+  Email     — SendGrid (SENDGRID_API_KEY env var)
+  WhatsApp  — Twilio (TWILIO_* env vars + agency WA number)
+  Telegram  — Bot API (TELEGRAM_BOT_TOKEN env var + agency chat ID)
 
 Endpoints
 ---------
@@ -85,7 +74,7 @@ def _scan_interval(days: int) -> int:
 
 
 # ---------------------------------------------------------------------------
-# Tier-aware rate limiting  (in-memory)
+# Tier-aware rate limiting
 # ---------------------------------------------------------------------------
 
 _call_log: dict = defaultdict(list)
@@ -194,7 +183,10 @@ def _run_prism_sync(
     _bookings.upsert(booking)
 
     if decision.action in (RYDEAction.STRIKE, RYDEAction.PHANTOM_HOLD):
-        _notifier.decision(booking, decision)
+        # Load the agency's notification config and fire all channels
+        ag_obj = _agencies.get_by_name(agency)
+        notification_config = ag_obj.notification_config if ag_obj else {}
+        _notifier.decision(booking, decision, notification_config=notification_config)
 
     return decision.action.value
 
@@ -501,7 +493,6 @@ async def submit_monitor(
         if cached:
             return cached["response"]
 
-    # Enforce active booking cap based on subscription tier
     limits = TIER_LIMITS.get(tier, TIER_LIMITS["free"])
     if limits["max_bookings"] > 0:
         active_rows = [r for r in _bookings.get_by_agency(agency) if r.get("_active")]
@@ -607,10 +598,6 @@ async def list_bookings(
     return {"agency": agency, "count": len(rows), "bookings": [_booking_to_response(r) for r in rows]}
 
 
-# ---------------------------------------------------------------------------
-# GET /bookings/{id}
-# ---------------------------------------------------------------------------
-
 @router.get("/bookings/{tracking_id}")
 async def get_booking(tracking_id: str, auth: tuple = Depends(require_api_key)):
     agency, *_ = auth
@@ -620,10 +607,6 @@ async def get_booking(tracking_id: str, auth: tuple = Depends(require_api_key)):
         raise HTTPException(status_code=404, detail="Booking not found.")
     return _booking_to_response(match)
 
-
-# ---------------------------------------------------------------------------
-# GET /bookings/{id}/audit
-# ---------------------------------------------------------------------------
 
 @router.get("/bookings/{tracking_id}/audit")
 async def get_booking_audit(tracking_id: str, auth: tuple = Depends(require_api_key)):
@@ -734,10 +717,6 @@ async def patch_booking(
     }
 
 
-# ---------------------------------------------------------------------------
-# DELETE /bookings/{id}
-# ---------------------------------------------------------------------------
-
 @router.delete("/bookings/{tracking_id}")
 async def delete_booking(tracking_id: str, auth: tuple = Depends(require_api_key)):
     agency, *_ = auth
@@ -748,10 +727,6 @@ async def delete_booking(tracking_id: str, auth: tuple = Depends(require_api_key
     _bookings.log_audit(tracking_id, agency, "stopped", {"stopped_at": datetime.utcnow().isoformat() + "Z"})
     return {"ok": True, "tracking_id": tracking_id, "status": "stopped"}
 
-
-# ---------------------------------------------------------------------------
-# GET /analytics
-# ---------------------------------------------------------------------------
 
 @router.get("/analytics")
 async def analytics(auth: tuple = Depends(require_api_key)):
@@ -775,10 +750,6 @@ async def analytics(auth: tuple = Depends(require_api_key)):
         "booking_limit":        limits["max_bookings"] if limits["max_bookings"] > 0 else "unlimited",
     }
 
-
-# ---------------------------------------------------------------------------
-# GET /account
-# ---------------------------------------------------------------------------
 
 @router.get("/account")
 async def account(auth: tuple = Depends(require_api_key)):

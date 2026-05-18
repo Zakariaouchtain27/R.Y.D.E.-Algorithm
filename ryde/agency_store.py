@@ -8,15 +8,16 @@ PostgreSQL connection is deferred to the first actual query so that
 module import (and therefore uvicorn startup) never blocks waiting
 for the database to become available.
 """
+import json
 import os
 import re
 import secrets
 import sqlite3
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from threading import RLock
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 _DATABASE_URL = os.getenv("DATABASE_URL", "")
 
@@ -27,7 +28,7 @@ _DATABASE_URL = os.getenv("DATABASE_URL", "")
 TIER_LIMITS: dict = {
     "free":    {"max_bookings": 3,   "rate_limit": 20},
     "starter": {"max_bookings": 25,  "rate_limit": 60},
-    "pro":     {"max_bookings": -1,  "rate_limit": 120},  # -1 = unlimited
+    "pro":     {"max_bookings": -1,  "rate_limit": 120},
 }
 
 
@@ -46,6 +47,7 @@ class Agency:
     ls_order_id: Optional[str] = None
     stripe_customer_id: Optional[str] = None
     subscription_tier: str = "free"
+    notification_config: Dict = field(default_factory=dict)
 
 
 class AgencyStore:
@@ -106,25 +108,27 @@ class AgencyStore:
         with self._lock:
             self._execute("""
                 CREATE TABLE IF NOT EXISTS agencies (
-                    id                 TEXT PRIMARY KEY,
-                    name               TEXT NOT NULL,
-                    email              TEXT NOT NULL,
-                    api_key            TEXT UNIQUE NOT NULL,
-                    environment        TEXT NOT NULL DEFAULT 'test',
-                    active             INTEGER NOT NULL DEFAULT 1,
-                    total_calls        INTEGER NOT NULL DEFAULT 0,
-                    last_call_at       TEXT,
-                    created_at         TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                    ls_subscription_id TEXT,
-                    ls_order_id        TEXT,
-                    stripe_customer_id TEXT,
-                    subscription_tier  TEXT DEFAULT 'free'
+                    id                   TEXT PRIMARY KEY,
+                    name                 TEXT NOT NULL,
+                    email                TEXT NOT NULL,
+                    api_key              TEXT UNIQUE NOT NULL,
+                    environment          TEXT NOT NULL DEFAULT 'test',
+                    active               INTEGER NOT NULL DEFAULT 1,
+                    total_calls          INTEGER NOT NULL DEFAULT 0,
+                    last_call_at         TEXT,
+                    created_at           TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    ls_subscription_id   TEXT,
+                    ls_order_id          TEXT,
+                    stripe_customer_id   TEXT,
+                    subscription_tier    TEXT DEFAULT 'free',
+                    notification_config  TEXT DEFAULT '{}'
                 )
             """)
             self._add_column_if_missing("agencies", "ls_subscription_id", "TEXT")
             self._add_column_if_missing("agencies", "ls_order_id", "TEXT")
             self._add_column_if_missing("agencies", "stripe_customer_id", "TEXT")
             self._add_column_if_missing("agencies", "subscription_tier", "TEXT DEFAULT 'free'")
+            self._add_column_if_missing("agencies", "notification_config", "TEXT DEFAULT '{}'")
             self._commit()
 
     def _add_column_if_missing(self, table: str, column: str, col_type: str) -> None:
@@ -222,12 +226,20 @@ class AgencyStore:
             self._commit()
 
     def set_subscription_tier(self, agency_id: str, tier: str) -> None:
-        """Update the subscription tier for an agency (free / starter / pro)."""
         tier = tier if tier in TIER_LIMITS else "free"
         with self._lock:
             self._execute(
                 "UPDATE agencies SET subscription_tier = ? WHERE id = ?",
                 (tier, agency_id),
+            )
+            self._commit()
+
+    def set_notification_config(self, agency_id: str, config: dict) -> None:
+        """Persist the agency's notification channel settings (JSON blob)."""
+        with self._lock:
+            self._execute(
+                "UPDATE agencies SET notification_config = ? WHERE id = ?",
+                (json.dumps(config), agency_id),
             )
             self._commit()
 
@@ -284,6 +296,10 @@ class AgencyStore:
 
     @staticmethod
     def _from_row(row) -> "Agency":
+        try:
+            nc = json.loads(row["notification_config"] or "{}")
+        except Exception:
+            nc = {}
         return Agency(
             id=row["id"],
             name=row["name"],
@@ -298,4 +314,5 @@ class AgencyStore:
             ls_order_id=row["ls_order_id"],
             stripe_customer_id=row["stripe_customer_id"],
             subscription_tier=row["subscription_tier"] or "free",
+            notification_config=nc,
         )
