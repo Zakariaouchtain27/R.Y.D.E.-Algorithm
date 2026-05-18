@@ -1,18 +1,24 @@
+"""
+Async BookingStore — SQLAlchemy + asyncpg (prod) / aiosqlite (dev).
+All public methods are coroutines; callers must await them.
+"""
 import json
-import os
-import sqlite3
-from datetime import datetime
-from pathlib import Path
-from threading import RLock
+import logging
+from datetime import datetime, timezone
 from typing import List, Optional
 
+from sqlalchemy import func, insert, select, update
+
+from .db import (
+    AsyncSessionLocal, IS_PG,
+    audit_log_table, bookings_table, idempotency_table, _dialect_insert,
+)
 from .models import Booking, Passenger
 
-_DATABASE_URL = os.getenv("DATABASE_URL", "")
+log = logging.getLogger(__name__)
 
 
 class _AuditEncoder(json.JSONEncoder):
-    """Safely serialise audit detail dicts that may contain datetime / Decimal objects."""
     def default(self, obj):
         if isinstance(obj, datetime):
             return obj.isoformat()
@@ -25,311 +31,223 @@ class _AuditEncoder(json.JSONEncoder):
         return str(obj)
 
 
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _agency_filter(agency: str):
+    """Cross-dialect expression: JSON field metadata.agency."""
+    if IS_PG:
+        from sqlalchemy import text
+        return text("data::json->'metadata'->>'agency' = :ag").bindparams(ag=agency)
+    return func.json_extract(bookings_table.c.data, "$.metadata.agency") == agency
+
+
 class BookingStore:
-    """
-    SQLite-backed store for local dev; PostgreSQL in production.
-    Set DATABASE_URL to switch engines — no other changes needed.
-
-    PostgreSQL connection is deferred to the first actual query so that
-    module import (and therefore uvicorn startup) never blocks waiting
-    for the database to become available.
-    """
-
     def __init__(self, db_path: str = "ryde.db"):
-        self._lock  = RLock()   # RLock: same thread can re-enter during lazy init
-        self._pg    = bool(_DATABASE_URL)
-        self._ready = False     # True after connection + schema are initialised
-        self._conn  = None
-
-        if self._pg:
-            import psycopg2.extras
-            self._dict_cursor = psycopg2.extras.DictCursor
-            # Connection deferred to first _execute call.  Connecting at
-            # import time would block the whole Python process for up to the
-            # OS TCP timeout (~120s) if PostgreSQL isn't ready yet, which
-            # prevents Railway's healthcheck from ever getting a response.
-        else:
-            Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-            self._conn = sqlite3.connect(db_path, check_same_thread=False)
-            self._dict_cursor = None
-            self._init_schema()
-            self._ready = True
+        pass  # engine / session managed globally in ryde.db
 
     # ------------------------------------------------------------------
-    # Internal helpers
+    # Bookings
     # ------------------------------------------------------------------
 
-    def _ensure_ready(self) -> None:
-        """Connect to PostgreSQL and init schema on first use.
-        Must be called while holding self._lock."""
-        if self._ready:
-            return
-        import psycopg2
-        self._conn = psycopg2.connect(_DATABASE_URL)
-        self._conn.autocommit = False
-        # Set _ready before calling _init_schema so that _execute calls
-        # inside _init_schema don't recurse back into this method.
-        self._ready = True
-        self._init_schema()
-
-    def _q(self, sql: str) -> str:
-        """Swap SQLite ? placeholders for PostgreSQL %s."""
-        return sql.replace("?", "%s") if self._pg else sql
-
-    def _execute(self, sql: str, params=()):
-        """Always call under self._lock."""
-        if self._pg:
-            self._ensure_ready()
-            cur = self._conn.cursor(cursor_factory=self._dict_cursor)
-        else:
-            cur = self._conn.cursor()
-        cur.execute(self._q(sql), params)
-        return cur
-
-    def _commit(self):
-        """Always call under self._lock."""
-        self._conn.commit()
-
-    def _agency_filter(self) -> str:
-        """SQL expression: JSON field metadata.agency as text."""
-        if self._pg:
-            return "data::json->'metadata'->>'agency'"
-        return "json_extract(data, '$.metadata.agency')"
-
-    def _insert_or_ignore(self, table: str, cols: List[str]) -> str:
-        ph = ", ".join(["?"] * len(cols))
-        col_str = ", ".join(cols)
-        if self._pg:
-            return f"INSERT INTO {table} ({col_str}) VALUES ({ph}) ON CONFLICT DO NOTHING"
-        return f"INSERT OR IGNORE INTO {table} ({col_str}) VALUES ({ph})"
-
-    # ------------------------------------------------------------------
-    # Schema
-    # ------------------------------------------------------------------
-
-    def _init_schema(self):
-        audit_id = "SERIAL PRIMARY KEY" if self._pg else "INTEGER PRIMARY KEY AUTOINCREMENT"
-        with self._lock:
-            self._execute("""
-                CREATE TABLE IF NOT EXISTS bookings (
-                    booking_id  TEXT PRIMARY KEY,
-                    data        TEXT NOT NULL,
-                    active      INTEGER NOT NULL DEFAULT 1,
-                    created_at  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                    updated_at  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
-            self._execute(f"""
-                CREATE TABLE IF NOT EXISTS audit_log (
-                    id          {audit_id},
-                    booking_id  TEXT NOT NULL,
-                    agency      TEXT NOT NULL DEFAULT '',
-                    event       TEXT NOT NULL,
-                    detail      TEXT NOT NULL DEFAULT '{{}}',
-                    created_at  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
-            self._execute(
-                "CREATE INDEX IF NOT EXISTS audit_log_booking_idx ON audit_log (booking_id)"
-            )
-            self._execute("""
-                CREATE TABLE IF NOT EXISTS idempotency_keys (
-                    idem_key    TEXT PRIMARY KEY,
-                    tracking_id TEXT NOT NULL,
-                    response    TEXT NOT NULL,
-                    created_at  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
-            self._commit()
-
-    # ------------------------------------------------------------------
-    # Write — bookings
-    # ------------------------------------------------------------------
-
-    def upsert(self, booking: Booking) -> None:
+    async def upsert(self, booking: Booking) -> None:
         data = json.dumps(self._to_dict(booking))
-        with self._lock:
-            self._execute(
-                """
-                INSERT INTO bookings (booking_id, data) VALUES (?, ?)
-                ON CONFLICT (booking_id) DO UPDATE SET
-                    data       = excluded.data,
-                    updated_at = CURRENT_TIMESTAMP
-                """,
-                (booking.booking_id, data),
+        now  = _now()
+        stmt = (
+            _dialect_insert(bookings_table)
+            .values(
+                booking_id=booking.booking_id, data=data, active=1,
+                created_at=now, updated_at=now,
             )
-            self._commit()
-
-    def deactivate(self, booking_id: str) -> None:
-        with self._lock:
-            self._execute(
-                "UPDATE bookings SET active = 0, updated_at = CURRENT_TIMESTAMP WHERE booking_id = ?",
-                (booking_id,),
+            .on_conflict_do_update(
+                index_elements=["booking_id"],
+                set_={"data": data, "updated_at": now},
             )
-            self._commit()
+        )
+        async with AsyncSessionLocal() as session:
+            async with session.begin():
+                await session.execute(stmt)
 
-    # ------------------------------------------------------------------
-    # Read — bookings
-    # ------------------------------------------------------------------
+    async def deactivate(self, booking_id: str) -> None:
+        async with AsyncSessionLocal() as session:
+            async with session.begin():
+                await session.execute(
+                    update(bookings_table)
+                    .where(bookings_table.c.booking_id == booking_id)
+                    .values(active=0, updated_at=_now())
+                )
 
-    def get_active(self) -> List[Booking]:
-        with self._lock:
-            rows = self._execute("SELECT data FROM bookings WHERE active = 1").fetchall()
-        return [self._from_dict(json.loads(r[0])) for r in rows]
+    async def get_active(self) -> List[Booking]:
+        async with AsyncSessionLocal() as session:
+            rows = (await session.execute(
+                select(bookings_table).where(bookings_table.c.active == 1)
+            )).fetchall()
+        return [self._from_dict(json.loads(r.data)) for r in rows]
 
-    def get_by_id(self, booking_id: str) -> Optional[Booking]:
-        with self._lock:
-            row = self._execute(
-                "SELECT data FROM bookings WHERE booking_id = ?",
-                (booking_id,),
-            ).fetchone()
-        return self._from_dict(json.loads(row[0])) if row else None
+    async def get_by_id(self, booking_id: str) -> Optional[Booking]:
+        async with AsyncSessionLocal() as session:
+            row = (await session.execute(
+                select(bookings_table)
+                .where(bookings_table.c.booking_id == booking_id)
+            )).fetchone()
+        return self._from_dict(json.loads(row.data)) if row else None
 
-    def get_by_agency(self, agency: str) -> List[dict]:
-        af = self._agency_filter()
-        with self._lock:
-            rows = self._execute(
-                f"""
-                SELECT data, active, created_at, updated_at
-                FROM bookings
-                WHERE {af} = ?
-                ORDER BY created_at DESC
-                """,
-                (agency,),
-            ).fetchall()
+    async def get_by_agency(self, agency: str) -> List[dict]:
+        async with AsyncSessionLocal() as session:
+            rows = (await session.execute(
+                select(
+                    bookings_table.c.data,
+                    bookings_table.c.active,
+                    bookings_table.c.created_at,
+                    bookings_table.c.updated_at,
+                )
+                .where(_agency_filter(agency))
+                .order_by(bookings_table.c.created_at.desc())
+            )).fetchall()
         result = []
         for row in rows:
-            d = json.loads(row[0])
-            d["_active"] = bool(row[1])
-            d["_created_at"] = str(row[2])
-            d["_updated_at"] = str(row[3])
+            d = json.loads(row.data)
+            d["_active"]     = bool(row.active)
+            d["_created_at"] = str(row.created_at)
+            d["_updated_at"] = str(row.updated_at)
             result.append(d)
         return result
 
-    def get_agency_savings(self, agency: str) -> float:
-        af = self._agency_filter()
-        with self._lock:
-            try:
-                row = self._execute(
-                    f"""
-                    SELECT COALESCE(SUM(ro.savings), 0)
-                    FROM rebooking_outcomes ro
-                    JOIN bookings b ON b.booking_id = ro.booking_id
-                    WHERE {af} = ?
-                    AND ro.success = 1
-                    """,
-                    (agency,),
-                ).fetchone()
-                return float(row[0]) if row else 0.0
-            except Exception:
-                self._conn.rollback()
-                return 0.0
+    async def get_agency_savings(self, agency: str) -> float:
+        try:
+            async with AsyncSessionLocal() as session:
+                rows = (await session.execute(
+                    select(audit_log_table.c.detail)
+                    .where(
+                        audit_log_table.c.agency == agency,
+                        audit_log_table.c.event  == "decision",
+                    )
+                )).fetchall()
+            total = 0.0
+            for row in rows:
+                d = json.loads(row.detail)
+                if d.get("action") == "STRIKE":
+                    total += float(d.get("net_savings", 0))
+            return total
+        except Exception:
+            return 0.0
 
     # ------------------------------------------------------------------
     # Audit log
     # ------------------------------------------------------------------
 
-    def log_audit(self, booking_id: str, agency: str, event: str, detail: dict) -> None:
-        with self._lock:
-            self._execute(
-                "INSERT INTO audit_log (booking_id, agency, event, detail) VALUES (?, ?, ?, ?)",
-                (booking_id, agency, event, json.dumps(detail, cls=_AuditEncoder)),
-            )
-            self._commit()
+    async def log_audit(self, booking_id: str, agency: str, event: str, detail: dict) -> None:
+        async with AsyncSessionLocal() as session:
+            async with session.begin():
+                await session.execute(
+                    insert(audit_log_table).values(
+                        booking_id=booking_id,
+                        agency=agency,
+                        event=event,
+                        detail=json.dumps(detail, cls=_AuditEncoder),
+                        created_at=_now(),
+                    )
+                )
 
-    def get_audit(self, booking_id: str) -> List[dict]:
-        with self._lock:
-            rows = self._execute(
-                """
-                SELECT id, agency, event, detail, created_at
-                FROM audit_log WHERE booking_id = ?
-                ORDER BY id ASC
-                """,
-                (booking_id,),
-            ).fetchall()
+    async def get_audit(self, booking_id: str) -> List[dict]:
+        async with AsyncSessionLocal() as session:
+            rows = (await session.execute(
+                select(
+                    audit_log_table.c.id,
+                    audit_log_table.c.agency,
+                    audit_log_table.c.event,
+                    audit_log_table.c.detail,
+                    audit_log_table.c.created_at,
+                )
+                .where(audit_log_table.c.booking_id == booking_id)
+                .order_by(audit_log_table.c.id.asc())
+            )).fetchall()
         return [
             {
-                "seq":       row[0],
-                "agency":    row[1],
-                "event":     row[2],
-                "detail":    json.loads(row[3]),
-                "timestamp": str(row[4]),
+                "seq":       row.id,
+                "agency":    row.agency,
+                "event":     row.event,
+                "detail":    json.loads(row.detail),
+                "timestamp": str(row.created_at),
             }
             for row in rows
         ]
 
-    def get_last_decision_by_agency(self, agency: str) -> dict:
-        """
-        Returns {booking_id: decision_detail_dict} for the most recent
-        PRISM 'decision' audit event per booking owned by the agency.
-
-        Single-pass scan ordered newest-first; keeps the first (latest)
-        entry seen per booking_id to avoid an N+1 per-booking pattern.
-        """
-        with self._lock:
-            rows = self._execute(
-                """
-                SELECT booking_id, detail
-                FROM audit_log
-                WHERE event = 'decision' AND agency = ?
-                ORDER BY id DESC
-                """,
-                (agency,),
-            ).fetchall()
+    async def get_last_decision_by_agency(self, agency: str) -> dict:
+        async with AsyncSessionLocal() as session:
+            rows = (await session.execute(
+                select(audit_log_table.c.booking_id, audit_log_table.c.detail)
+                .where(
+                    audit_log_table.c.event  == "decision",
+                    audit_log_table.c.agency == agency,
+                )
+                .order_by(audit_log_table.c.id.desc())
+            )).fetchall()
         seen: dict = {}
         for row in rows:
-            bid = row[0]
-            if bid not in seen:
-                seen[bid] = json.loads(row[1])
+            if row.booking_id not in seen:
+                seen[row.booking_id] = json.loads(row.detail)
         return seen
 
-    def get_billing_events(self, agency: str) -> list:
-        """Return all billing audit events for this agency, newest first."""
-        with self._lock:
-            rows = self._execute(
-                """
-                SELECT booking_id, event, detail, created_at
-                FROM audit_log
-                WHERE agency = ?
-                  AND event IN ('billing_charged', 'billing_error', 'billing_skipped')
-                ORDER BY id DESC
-                """,
-                (agency,),
-            ).fetchall()
-        result = []
-        for row in rows:
-            result.append({
-                "booking_id": row[0],
-                "event":      row[1],
-                "detail":     json.loads(row[2]),
-                "timestamp":  str(row[3]),
-            })
-        return result
+    async def get_billing_events(self, agency: str) -> list:
+        async with AsyncSessionLocal() as session:
+            rows = (await session.execute(
+                select(
+                    audit_log_table.c.booking_id,
+                    audit_log_table.c.event,
+                    audit_log_table.c.detail,
+                    audit_log_table.c.created_at,
+                )
+                .where(
+                    audit_log_table.c.agency == agency,
+                    audit_log_table.c.event.in_(
+                        ["billing_charged", "billing_error", "billing_skipped"]
+                    ),
+                )
+                .order_by(audit_log_table.c.id.desc())
+            )).fetchall()
+        return [
+            {
+                "booking_id": row.booking_id,
+                "event":      row.event,
+                "detail":     json.loads(row.detail),
+                "timestamp":  str(row.created_at),
+            }
+            for row in rows
+        ]
 
     # ------------------------------------------------------------------
-    # Idempotency cache
+    # Idempotency
     # ------------------------------------------------------------------
 
-    def get_idempotency(self, idem_key: str) -> Optional[dict]:
-        with self._lock:
-            row = self._execute(
-                "SELECT tracking_id, response FROM idempotency_keys WHERE idem_key = ?",
-                (idem_key,),
-            ).fetchone()
+    async def get_idempotency(self, idem_key: str) -> Optional[dict]:
+        async with AsyncSessionLocal() as session:
+            row = (await session.execute(
+                select(idempotency_table.c.tracking_id, idempotency_table.c.response)
+                .where(idempotency_table.c.idem_key == idem_key)
+            )).fetchone()
         if row:
-            return {"tracking_id": row[0], "response": json.loads(row[1])}
+            return {"tracking_id": row.tracking_id, "response": json.loads(row.response)}
         return None
 
-    def set_idempotency(self, idem_key: str, tracking_id: str, response: dict) -> None:
-        sql = self._insert_or_ignore(
-            "idempotency_keys", ["idem_key", "tracking_id", "response"]
+    async def set_idempotency(self, idem_key: str, tracking_id: str, response: dict) -> None:
+        stmt = (
+            _dialect_insert(idempotency_table)
+            .values(
+                idem_key=idem_key,
+                tracking_id=tracking_id,
+                response=json.dumps(response),
+                created_at=_now(),
+            )
+            .on_conflict_do_nothing()
         )
-        with self._lock:
-            self._execute(sql, (idem_key, tracking_id, json.dumps(response)))
-            self._commit()
+        async with AsyncSessionLocal() as session:
+            async with session.begin():
+                await session.execute(stmt)
 
     # ------------------------------------------------------------------
-    # Serialization
+    # Serialisation helpers
     # ------------------------------------------------------------------
 
     @staticmethod
@@ -337,26 +255,26 @@ class BookingStore:
         return {
             "booking_id": b.booking_id,
             "passenger": {
-                "title": b.passenger.title,
-                "given_name": b.passenger.given_name,
+                "title":       b.passenger.title,
+                "given_name":  b.passenger.given_name,
                 "family_name": b.passenger.family_name,
-                "born_on": b.passenger.born_on,
-                "gender": b.passenger.gender,
-                "email": b.passenger.email,
-                "phone": b.passenger.phone,
+                "born_on":     b.passenger.born_on,
+                "gender":      b.passenger.gender,
+                "email":       b.passenger.email,
+                "phone":       b.passenger.phone,
             },
-            "origin": b.origin,
-            "destination": b.destination,
-            "departure_date": b.departure_date.isoformat(),
-            "original_price": b.original_price,
-            "currency": b.currency,
-            "cancellation_fee": b.cancellation_fee,
-            "adapter": b.adapter,
+            "origin":              b.origin,
+            "destination":         b.destination,
+            "departure_date":      b.departure_date.isoformat(),
+            "original_price":      b.original_price,
+            "currency":            b.currency,
+            "cancellation_fee":    b.cancellation_fee,
+            "adapter":             b.adapter,
             "adapter_booking_ref": b.adapter_booking_ref,
-            "cabin_class": b.cabin_class,
-            "volatility_index": b.volatility_index,
-            "notify_webhook": b.notify_webhook,
-            "metadata": b.metadata,
+            "cabin_class":         b.cabin_class,
+            "volatility_index":    b.volatility_index,
+            "notify_webhook":      b.notify_webhook,
+            "metadata":            b.metadata,
         }
 
     @staticmethod

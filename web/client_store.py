@@ -1,136 +1,144 @@
+"""
+Async ClientStore — SQLAlchemy + asyncpg (prod) / aiosqlite (dev).
+All public methods are coroutines; callers must await them.
+"""
 import json
-import sqlite3
-from threading import Lock
+import logging
+from datetime import datetime, timezone
 from typing import List, Optional
+
+from sqlalchemy import delete, insert, select, update
+
+from ryde.db import (
+    AsyncSessionLocal, _dialect_insert,
+    clients_table, client_events_table,
+)
+
+log = logging.getLogger(__name__)
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _parse(row) -> dict:
+    d = dict(row._mapping)
+    d["booking_data"] = json.loads(d["booking_data"])
+    return d
 
 
 class ClientStore:
-    """
-    Stores client profiles and payment state alongside the bot's booking store.
-    Both use the same ryde.db so the bot auto-picks up newly registered bookings.
-    """
-
     def __init__(self, db_path: str = "ryde.db"):
-        self._lock = Lock()
-        self._conn = sqlite3.connect(db_path, check_same_thread=False)
-        self._conn.row_factory = sqlite3.Row
-        self._init_schema()
+        pass  # engine / session managed globally in ryde.db
 
-    def _init_schema(self):
-        self._conn.executescript("""
-            CREATE TABLE IF NOT EXISTS clients (
-                client_id              TEXT PRIMARY KEY,
-                name                   TEXT NOT NULL,
-                email                  TEXT NOT NULL,
-                stripe_customer_id     TEXT,
-                stripe_payment_method  TEXT,
-                booking_data           TEXT NOT NULL,
-                monitoring_active      INTEGER NOT NULL DEFAULT 0,
-                total_savings          REAL NOT NULL DEFAULT 0.0,
-                created_at             TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-            );
-            CREATE TABLE IF NOT EXISTS client_events (
-                id         INTEGER PRIMARY KEY AUTOINCREMENT,
-                client_id  TEXT NOT NULL,
-                event      TEXT NOT NULL,
-                data       TEXT NOT NULL,
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-            );
-        """)
-        self._conn.commit()
-
-    def create_client(
+    async def create_client(
         self,
         client_id: str,
         name: str,
         email: str,
         stripe_customer_id: Optional[str],
         booking_data: dict,
-    ):
-        with self._lock:
-            self._conn.execute(
-                """INSERT INTO clients
-                   (client_id, name, email, stripe_customer_id, booking_data)
-                   VALUES (?, ?, ?, ?, ?)""",
-                (client_id, name, email, stripe_customer_id, json.dumps(booking_data)),
-            )
-            self._conn.commit()
+    ) -> None:
+        async with AsyncSessionLocal() as session:
+            async with session.begin():
+                await session.execute(
+                    insert(clients_table).values(
+                        client_id=client_id,
+                        name=name,
+                        email=email,
+                        stripe_customer_id=stripe_customer_id,
+                        booking_data=json.dumps(booking_data),
+                        created_at=_now(),
+                    )
+                )
 
-    def get_client(self, client_id: str) -> Optional[dict]:
-        row = self._conn.execute(
-            "SELECT * FROM clients WHERE client_id = ?", (client_id,)
-        ).fetchone()
-        return self._parse(row) if row else None
+    async def get_client(self, client_id: str) -> Optional[dict]:
+        async with AsyncSessionLocal() as session:
+            row = (await session.execute(
+                select(clients_table)
+                .where(clients_table.c.client_id == client_id)
+            )).fetchone()
+        return _parse(row) if row else None
 
-    def get_client_by_booking_ref(self, booking_ref: str) -> Optional[dict]:
-        rows = self._conn.execute(
-            "SELECT * FROM clients WHERE monitoring_active = 1"
-        ).fetchall()
+    async def get_client_by_booking_ref(self, booking_ref: str) -> Optional[dict]:
+        async with AsyncSessionLocal() as session:
+            rows = (await session.execute(
+                select(clients_table)
+                .where(clients_table.c.monitoring_active == 1)
+            )).fetchall()
         for row in rows:
-            d = self._parse(row)
+            d = _parse(row)
             if d["booking_data"].get("booking_ref") == booking_ref:
                 return d
         return None
 
-    def update_stripe_customer(self, client_id: str, stripe_customer_id: str) -> None:
-        with self._lock:
-            self._conn.execute(
-                "UPDATE clients SET stripe_customer_id = ? WHERE client_id = ?",
-                (stripe_customer_id, client_id),
-            )
-            self._conn.commit()
+    async def update_stripe_customer(self, client_id: str, stripe_customer_id: str) -> None:
+        async with AsyncSessionLocal() as session:
+            async with session.begin():
+                await session.execute(
+                    update(clients_table)
+                    .where(clients_table.c.client_id == client_id)
+                    .values(stripe_customer_id=stripe_customer_id)
+                )
 
-    def delete_client(self, client_id: str) -> None:
-        with self._lock:
-            self._conn.execute("DELETE FROM clients WHERE client_id = ?", (client_id,))
-            self._conn.commit()
+    async def delete_client(self, client_id: str) -> None:
+        async with AsyncSessionLocal() as session:
+            async with session.begin():
+                await session.execute(
+                    delete(clients_table)
+                    .where(clients_table.c.client_id == client_id)
+                )
 
-    def save_payment_method(self, client_id: str, payment_method_id: str):
-        with self._lock:
-            self._conn.execute(
-                "UPDATE clients SET stripe_payment_method = ? WHERE client_id = ?",
-                (payment_method_id, client_id),
-            )
-            self._conn.commit()
+    async def save_payment_method(self, client_id: str, payment_method_id: str) -> None:
+        async with AsyncSessionLocal() as session:
+            async with session.begin():
+                await session.execute(
+                    update(clients_table)
+                    .where(clients_table.c.client_id == client_id)
+                    .values(stripe_payment_method=payment_method_id)
+                )
 
-    def activate_monitoring(self, client_id: str):
-        with self._lock:
-            self._conn.execute(
-                "UPDATE clients SET monitoring_active = 1 WHERE client_id = ?",
-                (client_id,),
-            )
-            self._conn.commit()
+    async def activate_monitoring(self, client_id: str) -> None:
+        async with AsyncSessionLocal() as session:
+            async with session.begin():
+                await session.execute(
+                    update(clients_table)
+                    .where(clients_table.c.client_id == client_id)
+                    .values(monitoring_active=1)
+                )
 
-    def add_savings(self, client_id: str, amount: float):
-        with self._lock:
-            self._conn.execute(
-                "UPDATE clients SET total_savings = total_savings + ? WHERE client_id = ?",
-                (amount, client_id),
-            )
-            self._conn.commit()
+    async def add_savings(self, client_id: str, amount: float) -> None:
+        async with AsyncSessionLocal() as session:
+            async with session.begin():
+                await session.execute(
+                    update(clients_table)
+                    .where(clients_table.c.client_id == client_id)
+                    .values(total_savings=clients_table.c.total_savings + amount)
+                )
 
-    def log_event(self, client_id: str, event: str, data: dict):
-        with self._lock:
-            self._conn.execute(
-                "INSERT INTO client_events (client_id, event, data) VALUES (?, ?, ?)",
-                (client_id, event, json.dumps(data)),
-            )
-            self._conn.commit()
+    async def log_event(self, client_id: str, event: str, data: dict) -> None:
+        async with AsyncSessionLocal() as session:
+            async with session.begin():
+                await session.execute(
+                    insert(client_events_table).values(
+                        client_id=client_id,
+                        event=event,
+                        data=json.dumps(data),
+                        created_at=_now(),
+                    )
+                )
 
-    def get_events(self, client_id: str) -> List[dict]:
-        rows = self._conn.execute(
-            "SELECT * FROM client_events WHERE client_id = ? ORDER BY created_at DESC LIMIT 30",
-            (client_id,),
-        ).fetchall()
+    async def get_events(self, client_id: str) -> List[dict]:
+        async with AsyncSessionLocal() as session:
+            rows = (await session.execute(
+                select(client_events_table)
+                .where(client_events_table.c.client_id == client_id)
+                .order_by(client_events_table.c.created_at.desc())
+                .limit(30)
+            )).fetchall()
         result = []
         for row in rows:
-            d = dict(row)
+            d = dict(row._mapping)
             d["data"] = json.loads(d["data"])
             result.append(d)
         return result
-
-    @staticmethod
-    def _parse(row: sqlite3.Row) -> dict:
-        d = dict(row)
-        d["booking_data"] = json.loads(d["booking_data"])
-        return d
