@@ -349,6 +349,71 @@ async def agency_dashboard_price_history(
     return {"route_key": route_key, "points": points, "count": len(points)}
 
 
+# ---------------------------------------------------------------------------
+# Notification settings
+# ---------------------------------------------------------------------------
+
+# Allowed keys so arbitrary data can't be stored in the config blob
+_NOTIF_ALLOWED_KEYS = {
+    "slack_webhook", "email", "whatsapp_to",
+    "telegram_chat_id", "webhook_url",
+}
+
+
+@app.get("/agency-dashboard/notifications")
+async def get_notifications(
+    x_agency_key: Optional[str] = Header(default=None),
+    x_api_key:    Optional[str] = Header(default=None),
+):
+    agency_obj = _require_agency_key(x_agency_key, x_api_key)
+    cfg = agency_obj.notification_config or {}
+    # Return which channels are active + masked values
+    return {
+        "slack_webhook":    _mask(cfg.get("slack_webhook", "")),
+        "email":            cfg.get("email", ""),
+        "whatsapp_to":      cfg.get("whatsapp_to", ""),
+        "telegram_chat_id": cfg.get("telegram_chat_id", ""),
+        "webhook_url":      _mask(cfg.get("webhook_url", "")),
+        "channels_active":  [k for k in _NOTIF_ALLOWED_KEYS if cfg.get(k)],
+    }
+
+
+@app.post("/agency-dashboard/notifications")
+async def save_notifications(
+    request: Request,
+    x_agency_key: Optional[str] = Header(default=None),
+    x_api_key:    Optional[str] = Header(default=None),
+):
+    agency_obj = _require_agency_key(x_agency_key, x_api_key)
+    body = await request.json()
+
+    # Keep existing config, overlay only allowed keys
+    cfg = dict(agency_obj.notification_config or {})
+    for key in _NOTIF_ALLOWED_KEYS:
+        if key in body:
+            value = str(body[key]).strip()
+            if value:
+                cfg[key] = value
+            else:
+                cfg.pop(key, None)  # empty string = remove channel
+
+    _agencies.set_notification_config(agency_obj.id, cfg)
+    return {"ok": True, "channels_active": [k for k in _NOTIF_ALLOWED_KEYS if cfg.get(k)]}
+
+
+def _mask(url: str) -> str:
+    """Return a masked version of a URL/token for display (don't expose secrets)."""
+    if not url:
+        return ""
+    if len(url) <= 12:
+        return "*" * len(url)
+    return url[:10] + "..." + url[-4:]
+
+
+# ---------------------------------------------------------------------------
+# Billing
+# ---------------------------------------------------------------------------
+
 @app.post("/agency-dashboard/billing/setup-intent")
 async def billing_setup_intent(
     x_agency_key: Optional[str] = Header(default=None),
